@@ -2,7 +2,7 @@
   "name": "get-it",
   "version": "0.1.0",
   "private": true,
-  "description": "Outcome-driven service business on FeltKit. First outcome: supplier invoice reconciliation (QuickBooks Online, read-only).",
+  "description": "Outcome-driven service business on FeltKit. First outcome: bill review and payable preparation over customer-supplied, Ledger-compatible bill sets; no accounting writes.",
   "type": "module",
   "engines": {
     "node": ">=22"

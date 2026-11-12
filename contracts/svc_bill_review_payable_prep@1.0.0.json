@@ -1,0 +1,152 @@
+{
+  "schema": "get-it.service-contract/1",
+  "id": "svc_bill_review_payable_prep",
+  "version": "1.0.0",
+  "status": "frozen",
+  "frozenOn": "2026-11-12",
+  "title": "Bill review and payable preparation",
+  "outcome": "Review the supplier bills the customer submits, validate their completeness and arithmetic, classify policy exceptions, prepare advisory payable recommendations, and deliver an evidence-backed review package approved by a person.",
+  "inputFormat": {
+    "schema": "get-it.bill-set/1",
+    "compatibility": "Ledger-compatible: the field names and integer minor-unit amounts of Ledger's contacts (kind vendor), accounts and bills, plus currency, tax, document references and approval state. The customer supplies the bill set; get-it reads no accounting system and holds no accounting credentials.",
+    "limits": { "maxBills": 1000, "maxVendors": 2000, "maxAccounts": 2000, "maxPriorBills": 5000, "maxLinesPerBill": 200 }
+  },
+  "inputs": {
+    "required": [
+      { "id": "bills", "kind": "bill[]", "minItems": 1, "source": "customer bill set" },
+      { "id": "vendors", "kind": "vendor[]", "source": "customer bill set" },
+      { "id": "accounts", "kind": "account[]", "source": "customer bill set", "note": "the chart of accounts / expense categories the bill lines name" },
+      { "id": "homeCurrency", "kind": "iso-4217", "source": "intake", "default": "USD" },
+      { "id": "timeZone", "kind": "iana-time-zone", "source": "intake" },
+      { "id": "asOfDate", "kind": "iso-date", "source": "intake", "note": "the review date: future-dated and overdue are judged against it" }
+    ],
+    "optional": [
+      { "id": "priorBills", "kind": "prior-bill[]", "source": "customer bill set", "note": "bills already processed, for duplicate detection" },
+      { "id": "policy.documentRequiredOverMinor", "kind": "integer", "default": 7500, "min": 0, "max": 100000000, "note": "a bill whose total exceeds this (home-currency minor units) needs a document reference" },
+      { "id": "policy.dueSoonBusinessDays", "kind": "integer", "default": 5, "min": 1, "max": 30 }
+    ]
+  },
+  "fields": {
+    "vendor": { "required": ["id", "name", "active"], "optional": ["paymentTermsDays", "defaultAccountId"] },
+    "account": { "required": ["id", "name", "active"], "optional": ["number", "type"] },
+    "bill": {
+      "required": ["id", "vendorId", "billNumber", "billDate", "dueDate", "currency", "status", "lines", "totalMinor"],
+      "optional": ["subtotalMinor", "taxMinor", "documents", "memo", "submittedBy"],
+      "status": ["draft", "approved", "posted", "void"],
+      "reviewableStatus": "draft"
+    },
+    "line": { "required": ["description", "accountId", "amountMinor"], "optional": ["taxMinor"] },
+    "document": { "required": ["ref"], "optional": ["kind", "sha256"], "kinds": ["receipt", "invoice", "other"] },
+    "priorBill": { "required": ["vendorId", "billNumber"], "optional": ["billDate", "totalMinor"] },
+    "amounts": "integer minor units of the bill's currency (cents for USD); line amountMinor >= 1; taxMinor, subtotalMinor and totalMinor >= 0; no decimals, no floats",
+    "dates": "ISO calendar dates YYYY-MM-DD; dueDate on or after billDate"
+  },
+  "currency": {
+    "home": "the order's homeCurrency",
+    "foreign": "a bill in any other ISO 4217 currency is classified foreign_currency_review, reported in its own currency, and always requires review",
+    "conversion": "none: get-it never converts currencies; payable totals are reported per currency"
+  },
+  "statuses": [
+    "rejected_malformed",
+    "blocked_pending_customer_input",
+    "duplicate_suspected",
+    "arithmetic_exception",
+    "foreign_currency_review",
+    "policy_exception",
+    "needs_information",
+    "ready_for_payable_approval"
+  ],
+  "statusRule": "each bill takes the first status in this order for which it has an exception; a bill with no exception is ready_for_payable_approval",
+  "exceptionTypes": [
+    { "type": "malformed_bill", "status": "rejected_malformed", "decision": "operator", "test": "a required field is missing or invalid, an amount is not an integer in range, a date is not a calendar date, or dueDate is before billDate" },
+    { "type": "vendor_unknown", "status": "blocked_pending_customer_input", "decision": "operator", "test": "vendorId is not in the vendor list" },
+    { "type": "account_unknown", "status": "blocked_pending_customer_input", "decision": "operator", "test": "a line's accountId is not in the account list" },
+    { "type": "duplicate_in_set", "status": "duplicate_suspected", "decision": "customer", "test": "another bill in the set has the same vendor and bill number (trimmed, case-insensitive)" },
+    { "type": "duplicate_of_prior", "status": "duplicate_suspected", "decision": "customer", "test": "a prior bill has the same vendor and bill number" },
+    { "type": "near_duplicate", "status": "duplicate_suspected", "decision": "customer", "test": "another bill in the set has the same vendor, currency and total, a bill date within 3 calendar days, and a different bill number" },
+    { "type": "subtotal_mismatch", "status": "arithmetic_exception", "decision": "operator", "test": "subtotalMinor is given and differs from the sum of line amounts" },
+    { "type": "tax_mismatch", "status": "arithmetic_exception", "decision": "operator", "test": "the bill's taxMinor is given and differs from the sum of line taxes" },
+    { "type": "total_mismatch", "status": "arithmetic_exception", "decision": "operator", "test": "totalMinor differs from the sum of line amounts plus the sum of line taxes" },
+    { "type": "foreign_currency", "status": "foreign_currency_review", "decision": "operator", "test": "currency differs from the home currency" },
+    { "type": "vendor_inactive", "status": "policy_exception", "decision": "operator", "test": "the vendor is inactive" },
+    { "type": "account_inactive", "status": "policy_exception", "decision": "operator", "test": "a line names an inactive account" },
+    { "type": "terms_mismatch", "status": "policy_exception", "decision": "operator", "test": "the vendor has paymentTermsDays and dueDate is not billDate plus those calendar days" },
+    { "type": "future_dated", "status": "policy_exception", "decision": "operator", "test": "billDate is after the asOfDate" },
+    { "type": "not_awaiting_approval", "status": "policy_exception", "decision": "operator", "test": "status is approved, posted or void: the bill is not awaiting approval" },
+    { "type": "document_missing", "status": "needs_information", "decision": "operator", "test": "a home-currency total over policy.documentRequiredOverMinor, or any foreign-currency bill, without a document reference" }
+  ],
+  "missingInformation": {
+    "malformed_bill": { "ask": "a corrected bill", "blocking": true },
+    "vendor_unknown": { "ask": "the vendor record", "blocking": true },
+    "account_unknown": { "ask": "the account record", "blocking": true },
+    "document_missing": { "ask": "a receipt or invoice document reference", "blocking": false }
+  },
+  "humanReview": {
+    "packetApproval": "every delivery requires one person's approval of the exact approval-packet digest, by an operator who did not request the review; agents, services and customers cannot approve; a re-run or correction produces a new packet that needs a new approval; an approval request expires after 7 days",
+    "flaggedForReview": "an exception requires review when the bill's total exceeds 50000 minor units in the home currency, when the bill is in a foreign currency, or when the exception is a suspected duplicate",
+    "reviewOverMinor": 50000,
+    "customerDecisions": "suspected duplicates are decided by the customer (confirmed, rejected or acknowledged); a decision is recorded and never changes an accounting record"
+  },
+  "recommendations": {
+    "values": ["approve_for_payment", "hold", "reject_resubmit"],
+    "rule": "ready_for_payable_approval → approve_for_payment; rejected_malformed → reject_resubmit; every other status → hold",
+    "advisory": "a recommendation is advice to the customer's approver; get-it approves, posts and pays nothing",
+    "priority": "overdue when dueDate is before asOfDate; due_soon when dueDate is on or before the policy.dueSoonBusinessDays-th business day after asOfDate; otherwise scheduled"
+  },
+  "deliverables": [
+    { "id": "bill_review_results", "files": ["bill-review-results.json", "bill-review-results.csv"] },
+    { "id": "payable_recommendation", "files": ["payable-recommendation.json", "payable-recommendation.csv"] },
+    { "id": "exception_list", "files": ["exceptions.json", "exceptions.csv"] },
+    { "id": "missing_information_requests", "files": ["missing-information-requests.json"] },
+    { "id": "source_document_references", "files": ["source-document-references.json"] },
+    { "id": "evidence", "files": ["evidence.json"], "content": "for every bill: its input digest, every validation check with its outcome, and the reference records it was checked against" },
+    { "id": "summary_export", "files": ["summary.csv"] },
+    { "id": "approval_packet", "files": ["approval-packet.json"], "content": "the contract, snapshot and output digests and the sha256 of every other file; the approval binds to its digest" }
+  ],
+  "acceptanceCriteria": [
+    { "id": "completeness", "test": "every bill in the snapshot has exactly one result, and no result names a bill outside it" },
+    { "id": "traceability", "test": "every result, exception, request, recommendation and document reference cites input digests present in the snapshot manifest" },
+    { "id": "recomputation", "test": "reviewing the snapshot again under this contract gives the delivered output exactly" },
+    { "id": "classification", "test": "each bill's status is the first status, in contract order, among its exceptions, and each exception agrees with a failed check" },
+    { "id": "no_accounting_mutation", "test": "every recommendation is advisory and one of the contract's values, and every input record still matches its digest" },
+    { "id": "package_integrity", "test": "every delivered file matches the sha256 listed in the approval packet" },
+    { "id": "reviewed", "test": "a person other than the requester approved the delivered approval packet's digest" },
+    { "id": "on_time", "test": "the package was published no later than the turnaround deadline" }
+  ],
+  "calendar": {
+    "businessDays": "Monday to Friday, excluding US federal holidays (observed dates: a Saturday holiday is observed the Friday before, a Sunday holiday the Monday after), in the customer's time zone"
+  },
+  "service": {
+    "turnaroundBusinessDays": 2,
+    "turnaroundStarts": "when the first complete bill set is recorded for the order",
+    "deadline": "the end (23:59:59.999, customer time zone) of the Nth counted business day after the start date",
+    "customerBlocked": "a business day on which the order is blocked pending customer input at any time does not count toward the turnaround",
+    "blockedLimitBusinessDays": 10,
+    "afterBlockedLimit": "cancel or re-quote (operator decision, recorded)",
+    "correctionWindowBusinessDays": 5,
+    "correction": "within the window and before acceptance, the customer may request a correction; get-it re-reviews (corrected inputs or a corrected review) and delivers a new package, with a new approval, under the same acceptance criteria and at no extra charge for bills in the original set",
+    "acceptance": "the customer accepts a delivery in full, or partially by naming the bills accepted"
+  },
+  "commercial": {
+    "currency": "USD",
+    "pricing": { "basePerRunMinor": 25000, "includedBills": 100, "perAdditionalBillMinor": 200 },
+    "billsCounted": "bills in the reviewed snapshot",
+    "charging": {
+      "delivered": "on full acceptance, charged on the bills counted",
+      "partial": "charged only when the customer accepts the completed portion, by the same pricing on the number of bills accepted",
+      "failedWork": "platform failures and deliveries that fail an acceptance criterion are not charged; a failed run is re-run at no charge",
+      "cancelled": "not charged, unless the customer accepts a completed portion (charged as partial)"
+    }
+  },
+  "boundaries": {
+    "excludedActions": [
+      "create, update, approve, post, pay, void or delete a bill or any accounting record",
+      "record or schedule a payment",
+      "post or reverse a journal entry",
+      "send email or any message to vendors",
+      "read or write an accounting system, database or ERP",
+      "convert currencies",
+      "match purchase orders, quantities, unit prices or receipts of goods"
+    ]
+  }
+}

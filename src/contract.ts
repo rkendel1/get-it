@@ -1,46 +1,74 @@
 /**
- * The frozen service contract. The JSON file is the source of truth; `contracts/frozen.json` pins
- * its digest. Loading refuses a contract whose content no longer matches its pin, so an edit to a
- * frozen contract is a failure, not a silent change. A change is a new version.
+ * Frozen service contracts.
+ *
+ * - A contract file is the source of truth for its terms.
+ * - `contracts/frozen.json` pins each version's digest and its status.
+ * - Loading refuses content that no longer matches its pin, so editing a frozen contract fails
+ *   instead of silently changing a promise.
+ * - A retired version keeps its pin forever. Its id and version can never be reused, and it can never
+ *   be loaded again.
+ *
+ * A change is a new version.
  */
-import contract from "../contracts/svc_invoice_reconciliation@1.0.0.json" with { type: "json" };
+import active from "../contracts/svc_bill_review_payable_prep@1.0.0.json" with { type: "json" };
 import frozen from "../contracts/frozen.json" with { type: "json" };
 import { digest } from "./canonical.js";
 
-export interface Tolerances {
-  unitPrice: { rule: "greater_of"; absoluteMicros: number; basisPoints: number };
-  quantity: { rule: "exact" };
-  invoiceTotal: { rule: "greater_of"; absoluteCents: number; basisPoints: number };
-}
-
 export interface Pricing {
-  basePerRunCents: number;
-  includedInvoices: number;
-  perAdditionalInvoiceCents: number;
+  basePerRunMinor: number;
+  includedBills: number;
+  perAdditionalBillMinor: number;
 }
 
-export type ServiceContract = typeof contract;
-export const CONTRACT_KEY = `${contract.id}@${contract.version}` as const;
+export type ContractDocument = typeof active;
 
-export function contractDigest(value: unknown = contract): string {
+interface Pin {
+  digest: string;
+  status: "active" | "retired";
+  retiredOn?: string;
+  reason?: string;
+}
+
+export const PINS = frozen.contracts as Record<string, Pin>;
+export const CONTRACT_KEY = `${active.id}@${active.version}` as const;
+
+export function contractDigest(value: unknown = active): string {
   return digest(value);
 }
 
-export function loadFrozenContract() {
-  const pinned = (frozen as Record<string, string>)[CONTRACT_KEY];
-  if (!pinned) throw new Error(`${CONTRACT_KEY} is not frozen`);
-  const actual = contractDigest();
-  if (actual !== pinned) throw new Error(`${CONTRACT_KEY} changed after freezing: pinned ${pinned}, content ${actual}`);
+export class ContractError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ContractError";
+  }
+}
+
+/** Verify a contract document against its pin and return its typed terms. */
+export function loadFrozenContract(document: ContractDocument = active) {
+  const key = `${document.id}@${document.version}`;
+  const pin = PINS[key];
+  if (!pin) throw new ContractError(`${key} is not frozen`);
+  if (pin.status !== "active") throw new ContractError(`${key} is ${pin.status}${pin.reason ? `: ${pin.reason}` : ""}`);
+  const actual = contractDigest(document);
+  if (actual !== pin.digest) throw new ContractError(`${key} changed after freezing: pinned ${pin.digest}, content ${actual}`);
+  const policyDefault = (id: string) => document.inputs.optional.find((i) => i.id === id) as { default: number; min: number; max: number };
   return {
-    key: CONTRACT_KEY,
-    digest: pinned,
-    contract,
-    tolerances: contract.tolerances as unknown as Tolerances,
-    pricing: contract.commercial.pricing as Pricing,
-    reviewOverCents: contract.review.humanReviewRequiredOverCents,
-    reviewForeignCurrency: contract.review.reviewRequiredWhenForeignCurrency,
-    service: contract.service,
-    customerDecisionTypes: new Set(contract.exceptionTypes.filter((e) => e.decision === "customer").map((e) => e.type)),
+    key,
+    digest: pin.digest,
+    contract: document,
+    statuses: document.statuses as readonly string[],
+    exceptionTypes: new Map(document.exceptionTypes.map((e) => [e.type, e])),
+    missingInformation: document.missingInformation as Record<string, { ask: string; blocking: boolean }>,
+    reviewOverMinor: document.humanReview.reviewOverMinor,
+    pricing: document.commercial.pricing as Pricing,
+    service: document.service,
+    limits: document.inputFormat.limits,
+    recommendationValues: document.recommendations.values as readonly string[],
+    policyDefaults: {
+      documentRequiredOverMinor: policyDefault("policy.documentRequiredOverMinor"),
+      dueSoonBusinessDays: policyDefault("policy.dueSoonBusinessDays"),
+    },
+    deliverableFiles: document.deliverables.flatMap((d) => d.files),
   };
 }
 

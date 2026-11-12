@@ -3,22 +3,24 @@
  *
  * Invariants:
  * - Every record carries an explicit `tenantId` equal to the tenant it is read in.
- * - Every source record's digest is the digest of its content.
- * - Every snapshot's digest is the digest of its scope and manifest, and every manifest entry is a
- *   stored source record.
- * - Every run's output digest and packet digest recompute, and its output recomputes from its
- *   snapshot under the frozen contract (the run is deterministic).
- * - Every packet's digest is its run's packet digest.
- * - Every approval names its packet's digest, an approver other than the requester, and a person.
- * - Every decision names an exception of its run that the contract leaves to the customer.
+ * - Every input record's digest is the digest of its content.
+ * - Every snapshot's digest is the digest of its scope and manifest.
+ * - Every run's output and packet digests recompute, and its output recomputes from its snapshot
+ *   under the frozen contract (the review is deterministic).
+ * - Every packet's digest is its run's. Every approval names its packet's digest, by a person who
+ *   did not request it.
+ * - Every decision names a customer-decided exception of its run.
+ * - Every delivery names an approved packet. Every acceptance names delivered bills and charges what
+ *   the contract's pricing gives. Every correction was requested within its window.
  *
- * Because FeltDB has no write-once collections, this check is how drift in append-only facts is
- * detected.
+ * FeltDB has no write-once collections, so this check is how drift in append-only facts is detected.
  */
+import { charge } from "../src/pricing.js";
 import { digest } from "../src/canonical.js";
-import { packetDigest, reconcile, type ReconciliationOutput } from "../src/reconcile.js";
-import { snapshotDigest } from "../src/snapshot.js";
-import { app, approvals, decisions, orders, packets, runs, snapshots, sourceRecords } from "./app.js";
+import { buildPackage } from "../src/deliverables.js";
+import { review, type ReviewOutput } from "../src/review.js";
+import { snapshotDigest, type ReviewScope } from "../src/snapshot.js";
+import { acceptances, app, approvals, blockEvents, corrections, decisions, deliveries, orders, packets, runs, snapshots, sourceRecords } from "./app.js";
 import { CONTRACT, loadSnapshot, requireTenant } from "./_guards.js";
 
 export const check = app.query({
@@ -29,29 +31,30 @@ export const check = app.query({
     const problems: string[] = [];
     const all = {
       orders: await ctx.db.find(orders, {}),
+      blockEvents: await ctx.db.find(blockEvents, {}),
       sourceRecords: await ctx.db.find(sourceRecords, {}),
       snapshots: await ctx.db.find(snapshots, {}),
       runs: await ctx.db.find(runs, {}),
       packets: await ctx.db.find(packets, {}),
       approvals: await ctx.db.find(approvals, {}),
       decisions: await ctx.db.find(decisions, {}),
+      deliveries: await ctx.db.find(deliveries, {}),
+      acceptances: await ctx.db.find(acceptances, {}),
+      corrections: await ctx.db.find(corrections, {}),
     };
     for (const [name, list] of Object.entries(all)) {
       for (const r of list as Array<{ id: string; tenantId?: string }>) if (r.tenantId !== tenantId) problems.push(`${name} ${r.id}: tenantId ${String(r.tenantId)} ≠ ${tenantId}`);
     }
 
-    for (const r of all.sourceRecords) if (digest(r.record) !== r.digest) problems.push(`source ${r.kind} ${r.sourceId}: content does not match its digest`);
-
+    for (const r of all.sourceRecords) if (digest(r.record) !== r.digest) problems.push(`input ${r.kind} ${r.key}: content does not match its digest`);
     const snapById = new Map(all.snapshots.map((x) => [x.id, x]));
-    for (const snap of all.snapshots) {
-      if (snapshotDigest(snap.scope as never, snap.manifest) !== snap.digest) problems.push(`snapshot ${snap.id}: digest does not recompute`);
-    }
+    for (const snap of all.snapshots) if (snapshotDigest(snap.scope as ReviewScope, snap.manifest) !== snap.digest) problems.push(`snapshot ${snap.id}: digest does not recompute`);
 
     const runById = new Map(all.runs.map((x) => [x.id, x]));
     for (const run of all.runs) {
-      const output = run.output as ReconciliationOutput;
+      const output = run.output as ReviewOutput;
       if (digest(output) !== run.outputDigest) problems.push(`run ${run.id}: output does not match its digest`);
-      if (packetDigest(output) !== run.packetDigest) problems.push(`run ${run.id}: packet digest does not recompute`);
+      if (buildPackage(output).packetDigest !== run.packetDigest) problems.push(`run ${run.id}: packet digest does not recompute`);
       const snap = snapById.get(run.snapshotId);
       if (!snap) {
         problems.push(`run ${run.id}: snapshot ${run.snapshotId} missing`);
@@ -59,17 +62,15 @@ export const check = app.query({
       }
       if (run.contractDigest !== CONTRACT.digest) continue; // another contract version: not recomputable here
       try {
-        if (digest(reconcile(await loadSnapshot(ctx, snap), CONTRACT)) !== run.outputDigest) problems.push(`run ${run.id}: output does not recompute from its snapshot`);
+        if (digest(review(await loadSnapshot(ctx, snap), CONTRACT)) !== run.outputDigest) problems.push(`run ${run.id}: output does not recompute from its snapshot`);
       } catch (e) {
-        problems.push(`run ${run.id}: snapshot cannot be rebuilt (${(e as Error).message})`);
+        problems.push(`run ${run.id}: snapshot cannot be re-reviewed (${(e as Error).message})`);
       }
     }
 
     const packetById = new Map(all.packets.map((x) => [x.id, x]));
-    for (const p of all.packets) {
-      const run = runById.get(p.runId);
-      if (!run || run.packetDigest !== p.digest) problems.push(`packet ${p.id}: digest is not its run's packet digest`);
-    }
+    for (const p of all.packets) if (runById.get(p.runId)?.packetDigest !== p.digest) problems.push(`packet ${p.id}: digest is not its run's packet digest`);
+    const approvalById = new Map(all.approvals.map((x) => [x.id, x]));
     for (const a of all.approvals) {
       const p = packetById.get(a.packetId);
       if (!p) problems.push(`approval ${a.id}: packet missing`);
@@ -78,9 +79,31 @@ export const check = app.query({
       if (a.approverType !== "user") problems.push(`approval ${a.id}: approver is not a person`);
     }
     for (const d of all.decisions) {
-      const e = (runById.get(d.runId)?.output as ReconciliationOutput | undefined)?.exceptions.find((x) => x.id === d.exceptionId);
+      const e = (runById.get(d.runId)?.output as ReviewOutput | undefined)?.exceptions.find((x) => x.id === d.exceptionId);
       if (!e) problems.push(`decision ${d.id}: exception ${d.exceptionId} not in its run`);
       else if (e.decision !== "customer") problems.push(`decision ${d.id}: ${e.type} is not a customer decision`);
+    }
+
+    const deliveryById = new Map(all.deliveries.map((x) => [x.id, x]));
+    for (const d of all.deliveries) {
+      const p = packetById.get(d.packetId);
+      const a = approvalById.get(d.approvalId);
+      if (!p || p.digest !== d.packetDigest) problems.push(`delivery ${d.id}: packet digest does not match`);
+      if (!a || a.packetId !== d.packetId || a.digest !== d.packetDigest) problems.push(`delivery ${d.id}: not covered by an approval of its packet`);
+      if (d.onTime !== d.publishedAt <= d.deadline) problems.push(`delivery ${d.id}: onTime does not agree with its deadline`);
+    }
+    for (const x of all.acceptances) {
+      const d = deliveryById.get(x.deliveryId);
+      const bills = new Set(((d && runById.get(d.runId)?.output) as ReviewOutput | undefined)?.results.map((r) => r.billKey) ?? []);
+      if (!d) problems.push(`acceptance ${x.id}: delivery missing`);
+      if (x.acceptedBills.some((k) => !bills.has(k)) || x.acceptedBills.length !== x.billsCounted) problems.push(`acceptance ${x.id}: accepted bills are not the delivery's`);
+      const expected = x.scope === "full" ? charge({ kind: "accepted", billsCounted: x.billsCounted }, CONTRACT.pricing) : charge({ kind: "partial", customerAcceptedPortion: true, billsAccepted: x.billsCounted }, CONTRACT.pricing);
+      if (expected.minor !== x.chargeMinor) problems.push(`acceptance ${x.id}: charge ${x.chargeMinor} ≠ ${expected.minor} by the contract`);
+    }
+    for (const c of all.corrections) {
+      const d = deliveryById.get(c.deliveryId);
+      if (!d) problems.push(`correction ${c.id}: delivery missing`);
+      else if (c.requestedAt > d.correctionWindowEndsAt) problems.push(`correction ${c.id}: requested after the window`);
     }
 
     return { problems, counts: Object.fromEntries(Object.entries(all).map(([k, v]) => [k, (v as unknown[]).length])) };

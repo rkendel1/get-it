@@ -1,3 +1,14 @@
 {
-  "svc_invoice_reconciliation@1.0.0": "sha256:5f99cb1826c40d4eac399f80aa183be88c5cce35518efce889b2f5801a964d40"
+  "contracts": {
+    "svc_invoice_reconciliation@1.0.0": {
+      "digest": "sha256:5f99cb1826c40d4eac399f80aa183be88c5cce35518efce889b2f5801a964d40",
+      "status": "retired",
+      "retiredOn": "2026-11-12",
+      "reason": "superseded before any order was bound to it; the first service is svc_bill_review_payable_prep@1.0.0, which uses customer-supplied, Ledger-compatible bill sets and no external system. Its id and version are never reused."
+    },
+    "svc_bill_review_payable_prep@1.0.0": {
+      "digest": "sha256:6097d09b5f39d202412bae4e69ad94e45768829c1f9149f12cc7648863f3c637",
+      "status": "active"
+    }
+  }
 }

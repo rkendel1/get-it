@@ -1,34 +1,37 @@
 /**
- * Price and charge, as the frozen contract states them. Integer cents throughout.
+ * Price and charge, as the frozen contract states them. Integer minor units throughout.
  */
 import type { Pricing } from "./contract.js";
 
-/** The price of a run over `invoices` counted invoices. */
-export function runPriceCents(invoices: number, p: Pricing): number {
-  if (!Number.isInteger(invoices) || invoices < 0) throw new RangeError("invoice count must be a non-negative integer");
-  return p.basePerRunCents + Math.max(0, invoices - p.includedInvoices) * p.perAdditionalInvoiceCents;
+/** The price of a run over `bills` counted bills. */
+export function runPriceMinor(bills: number, p: Pricing): number {
+  if (!Number.isInteger(bills) || bills < 0) throw new RangeError("bill count must be a non-negative integer");
+  return p.basePerRunMinor + Math.max(0, bills - p.includedBills) * p.perAdditionalBillMinor;
 }
 
 export type ChargeOutcome =
-  | { kind: "delivered"; invoicesCounted: number }
+  | { kind: "accepted"; billsCounted: number }
+  | { kind: "partial"; customerAcceptedPortion: boolean; billsAccepted: number }
+  | { kind: "cancelled"; customerAcceptedPortion: boolean; billsAccepted: number }
   | { kind: "platform_failure" }
-  | { kind: "partial"; customerAcceptedPortion: boolean; invoicesAccepted: number }
-  | { kind: "cancelled"; customerAcceptedPortion: boolean; invoicesAccepted: number };
+  | { kind: "failed_acceptance" };
 
 export interface Charge {
-  readonly cents: number;
+  readonly minor: number;
   readonly basis: string;
 }
 
 export function charge(outcome: ChargeOutcome, p: Pricing): Charge {
   switch (outcome.kind) {
     case "platform_failure":
-      return { cents: 0, basis: "platform failure: not charged" };
-    case "delivered":
-      return { cents: runPriceCents(outcome.invoicesCounted, p), basis: `delivered: ${outcome.invoicesCounted} invoices` };
+      return { minor: 0, basis: "platform failure: not charged" };
+    case "failed_acceptance":
+      return { minor: 0, basis: "failed an acceptance criterion: not charged" };
+    case "accepted":
+      return { minor: runPriceMinor(outcome.billsCounted, p), basis: `accepted: ${outcome.billsCounted} bills` };
     case "partial":
     case "cancelled":
-      if (!outcome.customerAcceptedPortion || outcome.invoicesAccepted === 0) return { cents: 0, basis: `${outcome.kind}: no completed portion accepted, not charged` };
-      return { cents: runPriceCents(outcome.invoicesAccepted, p), basis: `${outcome.kind}: customer accepted ${outcome.invoicesAccepted} invoices` };
+      if (!outcome.customerAcceptedPortion || outcome.billsAccepted === 0) return { minor: 0, basis: `${outcome.kind}: no completed portion accepted, not charged` };
+      return { minor: runPriceMinor(outcome.billsAccepted, p), basis: `${outcome.kind}: customer accepted ${outcome.billsAccepted} bills` };
   }
 }

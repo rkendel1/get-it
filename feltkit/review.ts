@@ -1,22 +1,23 @@
 /**
- * Review and decisions, per the frozen contract.
+ * Human review and customer decisions, per the frozen contract.
  *
- * - An operator requests review of one delivery packet. The packet is bound to the digest of
- *   (contract, snapshot, output).
- * - A different operator, who must be a person, approves that exact digest before the packet
- *   expires. A re-run produces a different packet; an approval never carries over.
- * - The customer's people decide the ambiguous business questions (exception types the contract
- *   marks `decision: customer`). A decision is recorded only. Nothing is written to QuickBooks.
+ * - An operator requests review of one approval packet. The packet's digest binds the contract, the
+ *   snapshot, the output, and the sha256 of every deliverable file.
+ * - A different operator, who must be a person, approves that exact digest before the request
+ *   expires. A re-run or correction produces a different packet; an approval never carries over.
+ * - The customer's people decide suspected duplicates. A decision is recorded only: nothing is
+ *   approved, posted, paid or voided.
  *
- * This is FeltKit's approval discipline (person-only, proposer ≠ approver, digest-bound, expiring,
- * re-checked when decided), applied to get-it's own records, as Ledger does with its proposals.
+ * This applies FeltKit's approval discipline (person-only, proposer ≠ approver, digest-bound,
+ * expiring, re-checked when decided) to get-it's own records, as Ledger does with its proposals.
  */
 import { fail, s } from "@feltdb/feltkit";
-import { packetDigest, type ReconciliationOutput } from "../src/reconcile.js";
+import { buildPackage } from "../src/deliverables.js";
+import type { ReviewOutput } from "../src/review.js";
 import { app, approvals, audit, decisions, orders, packets, runs } from "./app.js";
 import { requirePerson, requireTenant } from "./_guards.js";
 
-/** How long a review request stays approvable. An internal control, not a contract term. */
+/** How long a review request stays approvable (the contract's 7 days). */
 export const PACKET_TTL_MS = 7 * 86_400_000;
 
 export const request = app.mutation({
@@ -26,18 +27,17 @@ export const request = app.mutation({
     const tenantId = requireTenant(ctx);
     const run = await ctx.db.get(runs, a.runId);
     if (!run) fail("NOT_FOUND", "No such run.");
-    const digest = packetDigest(run.output as ReconciliationOutput);
-    if (digest !== run.packetDigest) fail("FAILED_PRECONDITION", "The run's output no longer matches its recorded packet digest. Run the integrity check.");
+    const { packetDigest: digest, packet } = buildPackage(run.output as ReviewOutput);
+    if (digest !== run.packetDigest) fail("FAILED_PRECONDITION", "The run's output no longer matches its recorded packet digest. Run the integrity check.", { hint: "STALE" });
     const [open] = await ctx.db.find(packets, { runId: run.id, digest });
-    if (open) return { packetId: open.id, digest, status: "existing" as const };
+    if (open && open.expiresAt >= Date.now()) return { packetId: open.id, digest, status: "existing" as const };
     const now = Date.now();
-    const output = run.output as ReconciliationOutput;
     const packetId = await ctx.db.insert(packets, {
       tenantId,
       orderId: run.orderId,
       runId: run.id,
       digest,
-      requiringReview: output.summary.requiringReview,
+      requiringReview: packet.summary.requiringReview,
       requestedBy: ctx.auth.requirePrincipal().id,
       requestedAt: now,
       expiresAt: now + PACKET_TTL_MS,
@@ -61,7 +61,7 @@ export const approve = app.mutation({
     if (Date.now() > packet.expiresAt) fail("FAILED_PRECONDITION", "This review request has expired. Request review again.", { hint: "EXPIRED" });
     // Re-check what is being approved against the stored output now, not as it was when requested.
     const run = await ctx.db.get(runs, packet.runId);
-    if (!run || packetDigest(run.output as ReconciliationOutput) !== packet.digest) fail("FAILED_PRECONDITION", "The packet no longer matches its run.", { hint: "STALE" });
+    if (!run || buildPackage(run.output as ReviewOutput).packetDigest !== packet.digest) fail("FAILED_PRECONDITION", "The packet no longer matches its run.", { hint: "STALE" });
     const [already] = await ctx.db.find(approvals, { packetId: packet.id });
     if (already) return { approvalId: already.id, status: "existing" as const };
     const approvalId = await ctx.db.insert(approvals, {
@@ -86,7 +86,7 @@ export const decide = app.mutation({
     const person = requirePerson(ctx);
     const run = await ctx.db.get(runs, a.runId);
     if (!run) fail("NOT_FOUND", "No such run.");
-    const exception = (run.output as ReconciliationOutput).exceptions.find((e) => e.id === a.exceptionId);
+    const exception = (run.output as ReviewOutput).exceptions.find((e) => e.id === a.exceptionId);
     if (!exception) fail("NOT_FOUND", "No such exception in this run.");
     if (exception.decision !== "customer") fail("FAILED_PRECONDITION", `${exception.type} is reviewed by the operator, not decided by the customer.`);
     const [existing] = await ctx.db.find(decisions, { runId: run.id, exceptionId: exception.id });

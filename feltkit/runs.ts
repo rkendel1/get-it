@@ -1,14 +1,15 @@
 /**
- * Reconciliation runs. A run is a pure function of (snapshot, contract), so running the same pair
- * again returns the recorded run instead of writing a second one.
+ * Review runs. A run is a pure function of (snapshot, contract), so reviewing the same pair again
+ * returns the recorded run instead of writing a second one.
  */
 import { fail, s } from "@feltdb/feltkit";
 import { digest } from "../src/canonical.js";
-import { packetDigest, reconcile } from "../src/reconcile.js";
+import { buildPackage } from "../src/deliverables.js";
+import { review } from "../src/review.js";
 import { app, audit, orders, runs, snapshots } from "./app.js";
 import { CONTRACT, loadSnapshot, requireTenant } from "./_guards.js";
 
-export const reconcileSnapshot = app.mutation({
+export const reviewSnapshot = app.mutation({
   access: "runs.write",
   args: { snapshotId: s.string() },
   handler: async (ctx, a) => {
@@ -22,9 +23,9 @@ export const reconcileSnapshot = app.mutation({
     const [existing] = await ctx.db.find(runs, { snapshotId: snap.id, contractDigest: CONTRACT.digest });
     if (existing) return { status: "duplicate" as const, runId: existing.id, outputDigest: existing.outputDigest, packetDigest: existing.packetDigest };
 
-    const output = reconcile(await loadSnapshot(ctx, snap), CONTRACT);
+    const output = review(await loadSnapshot(ctx, snap), CONTRACT);
     const outputDigest = digest(output);
-    const packet = packetDigest(output);
+    const { packetDigest } = buildPackage(output);
     const runId = await ctx.db.insert(runs, {
       tenantId,
       orderId: order.id,
@@ -32,14 +33,14 @@ export const reconcileSnapshot = app.mutation({
       snapshotDigest: snap.digest,
       contractDigest: CONTRACT.digest,
       outputDigest,
-      packetDigest: packet,
+      packetDigest,
       output,
       createdBy: ctx.auth.requirePrincipal().id,
       createdAt: Date.now(),
     });
-    if (order.status === "intake") await ctx.db.patch(orders, order.id, { status: "running" });
-    await audit.record(ctx, { subject: "run", id: runId, type: "run.recorded", data: { snapshotDigest: snap.digest, outputDigest, packetDigest: packet, summary: output.summary } });
-    return { status: "recorded" as const, runId, outputDigest, packetDigest: packet };
+    if (order.status === "intake" || order.status === "correcting") await ctx.db.patch(orders, order.id, { status: "reviewing" });
+    await audit.record(ctx, { subject: "run", id: runId, type: "run.recorded", data: { snapshotDigest: snap.digest, outputDigest, packetDigest, summary: output.summary } });
+    return { status: "recorded" as const, runId, outputDigest, packetDigest };
   },
 });
 

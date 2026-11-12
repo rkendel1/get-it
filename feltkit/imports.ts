@@ -1,57 +1,49 @@
 /**
- * Importing QuickBooks Online records into an order, idempotently.
+ * Importing a customer's Ledger-compatible bill set into an order, idempotently.
  *
- * The caller passes the raw QBO JSON exactly as the read-only connector returned it (`pullSource`).
- * Here it is normalized, content-addressed and recorded as a snapshot.
- *
- * - The same content imported twice is a `duplicate`: the same snapshot, nothing written.
- * - Changed content is a new snapshot. Only the records whose digest changed are added; the old
+ * - The same bill set imported twice, in any order, is a `duplicate`: the same snapshot, and
+ *   nothing written.
+ * - A changed set is a new snapshot. Only the records whose content changed are added; earlier
  *   versions stay, because facts are never overwritten.
+ * - Invalid reference data (vendors, accounts, prior bills) refuses the whole import with every
+ *   issue listed. An invalid bill is imported and reviewed as `rejected_malformed`.
  *
- * In Phase 1 an action pulls through the connector and calls this mutation.
+ * The first complete bill set starts the turnaround clock.
  */
 import { fail, s } from "@feltdb/feltkit";
-import { digest } from "../src/canonical.js";
-import { NormalizationError, normalizeBill, normalizePurchaseOrder } from "../src/qbo.js";
+import { BillSetError } from "../src/bills.js";
 import { buildSnapshot } from "../src/snapshot.js";
 import { app, audit, orders, snapshots, sourceRecords } from "./app.js";
-import { requireTenant } from "./_guards.js";
+import { CONTRACT, requireTenant } from "./_guards.js";
 
 export const record = app.mutation({
   access: "imports.write",
-  args: { orderId: s.string(), bills: s.array(s.unknown()), purchaseOrders: s.array(s.unknown()) },
+  args: { orderId: s.string(), billSet: s.unknown() },
   handler: async (ctx, a) => {
     const tenantId = requireTenant(ctx);
     const order = await ctx.db.get(orders, a.orderId);
     if (!order) fail("NOT_FOUND", "No such order.");
+    if (order.status === "accepted") fail("FAILED_PRECONDITION", "The order has been accepted.");
 
-    let normalized;
+    const scope = { homeCurrency: order.homeCurrency, timeZone: order.timeZone, asOfDate: order.asOfDate, policy: order.policy };
+    let snap;
     try {
-      const vendors = new Set(order.vendorIds);
-      const bills = a.bills.map((b) => normalizeBill(b as Record<string, unknown>)).filter((b) => vendors.size === 0 || vendors.has(b.vendorId));
-      for (const b of bills) if (b.txnDate < order.from || b.txnDate > order.to) fail("INVALID_ARGUMENT", `Bill ${b.id} (${b.txnDate}) is outside the order's period.`);
-      normalized = { bills, purchaseOrders: a.purchaseOrders.map((p) => normalizePurchaseOrder(p as Record<string, unknown>)) };
+      snap = buildSnapshot(scope, a.billSet, CONTRACT);
     } catch (e) {
-      if (e instanceof NormalizationError) fail("INVALID_ARGUMENT", `QuickBooks record refused: ${e.message}`);
+      if (e instanceof BillSetError) fail("INVALID_ARGUMENT", e.message, { hint: "BILL_SET_INVALID", issues: e.issues });
       throw e;
     }
-
-    const scope = { realmId: order.realmId, from: order.from, to: order.to, vendorIds: order.vendorIds, homeCurrency: order.homeCurrency };
-    const snap = buildSnapshot(scope, normalized.bills, normalized.purchaseOrders);
 
     const [existing] = await ctx.db.find(snapshots, { orderId: order.id, digest: snap.digest });
     if (existing) return { status: "duplicate" as const, snapshotId: existing.id, digest: snap.digest, recordsAdded: 0 };
 
     const now = Date.now();
-    const stored = new Set((await ctx.db.find(sourceRecords, { orderId: order.id })).map((r) => `${r.kind}:${r.sourceId}:${r.digest}`));
+    const stored = new Set((await ctx.db.find(sourceRecords, { orderId: order.id })).map((r) => `${r.kind}:${r.key}:${r.digest}`));
     let recordsAdded = 0;
-    for (const [kind, list] of [["bill", snap.bills], ["purchaseOrder", snap.purchaseOrders]] as const) {
-      for (const r of list) {
-        const d = digest(r);
-        if (stored.has(`${kind}:${r.id}:${d}`)) continue;
-        await ctx.db.insert(sourceRecords, { tenantId, orderId: order.id, kind, sourceId: r.id, digest: d, record: r, importedAt: now });
-        recordsAdded++;
-      }
+    for (const r of snap.records) {
+      if (stored.has(`${r.kind}:${r.key}:${r.digest}`)) continue;
+      await ctx.db.insert(sourceRecords, { tenantId, orderId: order.id, kind: r.kind, key: r.key, digest: r.digest, record: r.record, importedAt: now });
+      recordsAdded++;
     }
     const snapshotId = await ctx.db.insert(snapshots, {
       tenantId,
@@ -59,12 +51,12 @@ export const record = app.mutation({
       digest: snap.digest,
       scope,
       manifest: snap.manifest.map((m) => ({ ...m })),
-      bills: snap.bills.length,
-      purchaseOrders: snap.purchaseOrders.length,
+      bills: snap.manifest.filter((m) => m.kind === "bill").length,
       importedBy: ctx.auth.requirePrincipal().id,
       importedAt: now,
     });
-    await audit.record(ctx, { subject: "snapshot", id: snapshotId, type: "snapshot.recorded", data: { orderId: order.id, digest: snap.digest, bills: snap.bills.length, purchaseOrders: snap.purchaseOrders.length, recordsAdded } });
+    if (order.clockStartedAt === undefined) await ctx.db.patch(orders, order.id, { clockStartedAt: now });
+    await audit.record(ctx, { subject: "snapshot", id: snapshotId, type: "snapshot.recorded", data: { orderId: order.id, digest: snap.digest, recordsAdded } });
     return { status: "recorded" as const, snapshotId, digest: snap.digest, recordsAdded };
   },
 });
