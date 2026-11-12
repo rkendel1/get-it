@@ -39,27 +39,30 @@ The package contains:
 - an approval packet binding the sha256 of every file.
 
 **Status.** Implemented as stored FeltKit steps, with no workflow runtime:
-- import of the bill set;
-- review;
-- review request and person-only approval;
-- publication;
-- full or partial acceptance;
-- correction;
-- customer-blocked time; and
-- an integrity check.
+- **Intake:** contract-driven answers, bill-set upload, a completeness report and assumptions.
+- **Quoting:** an immutable quote priced by the contract.
+- **Quote acceptance**, which creates the order.
+- **Operator-recorded payment.** No payment provider is integrated.
+- **Explicit acceptance for fulfillment.** Only this starts the turnaround clock.
+- **Review**, person-only approval and publication.
+- **The customer delivery boundary:** view, download of exactly the approved files, full or partial acceptance, and
+  correction within the window.
+- Customer-blocked time.
+- An integrity check over every fact.
 
-Intake, quoting, payment and a customer UI are next. See [`docs/spec.md`](docs/spec.md), Appendix C.
+No accounting write is possible. **No HTTP or UI surface has been exercised:** every test calls FeltKit functions
+in-process. That is the next step. See [`docs/spec.md`](docs/spec.md), Appendix C.
 
 ```bash
 npm ci
 npm test   # codegen, typecheck, then the tests on a real FeltKit runtime (fresh FeltDB per test)
 ```
 
-- [`docs/spec.md`](docs/spec.md) is the building specification (revision 4).
-- `src/` holds the pure domain, with no FeltKit dependency: bills, snapshot, review, deliverables, acceptance,
-  pricing, calendar, money, contract and accounting.
-- `feltkit/` holds the application: tenancy, orders, imports, runs, review, delivery, accounting (refusal) and
-  integrity.
+- [`docs/spec.md`](docs/spec.md) is the building specification (revision 5).
+- `src/` holds the pure domain, with no FeltKit dependency: bills, snapshot, intake, review, deliverables,
+  acceptance, pricing, calendar, money, contract and accounting.
+- `feltkit/` holds the application: tenancy, intake, quotes, payments, orders, imports, runs, review, delivery,
+  accounting (refusal) and integrity.
 - `contracts/` holds frozen service contracts. A change is a new version. Retired versions keep their pins.
   `npm run contract:digest` checks them.
 

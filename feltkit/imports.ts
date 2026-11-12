@@ -1,5 +1,6 @@
 /**
- * Importing a customer's Ledger-compatible bill set into an order, idempotently.
+ * Importing a corrected Ledger-compatible bill set into an order already in fulfillment,
+ * idempotently. (An order's first snapshot is bound at quote acceptance from the intake's bill set.)
  *
  * - The same bill set imported twice, in any order, is a `duplicate`: the same snapshot, and
  *   nothing written.
@@ -8,13 +9,13 @@
  * - Invalid reference data (vendors, accounts, prior bills) refuses the whole import with every
  *   issue listed. An invalid bill is imported and reviewed as `rejected_malformed`.
  *
- * The first complete bill set starts the turnaround clock.
+ * Importing does not start or move the turnaround clock: only acceptance for fulfillment starts it.
  */
 import { fail, s } from "@feltdb/feltkit";
 import { BillSetError } from "../src/bills.js";
 import { buildSnapshot } from "../src/snapshot.js";
-import { app, audit, orders, snapshots, sourceRecords } from "./app.js";
-import { CONTRACT, requireTenant } from "./_guards.js";
+import { app, audit, orders, snapshots } from "./app.js";
+import { CONTRACT, requireFulfillment, requireTenant, storeRecords } from "./_guards.js";
 
 export const record = app.mutation({
   access: "imports.write",
@@ -23,7 +24,7 @@ export const record = app.mutation({
     const tenantId = requireTenant(ctx);
     const order = await ctx.db.get(orders, a.orderId);
     if (!order) fail("NOT_FOUND", "No such order.");
-    if (order.status === "accepted") fail("FAILED_PRECONDITION", "The order has been accepted.");
+    requireFulfillment(order);
 
     const scope = { homeCurrency: order.homeCurrency, timeZone: order.timeZone, asOfDate: order.asOfDate, policy: order.policy };
     let snap;
@@ -38,13 +39,7 @@ export const record = app.mutation({
     if (existing) return { status: "duplicate" as const, snapshotId: existing.id, digest: snap.digest, recordsAdded: 0 };
 
     const now = Date.now();
-    const stored = new Set((await ctx.db.find(sourceRecords, { orderId: order.id })).map((r) => `${r.kind}:${r.key}:${r.digest}`));
-    let recordsAdded = 0;
-    for (const r of snap.records) {
-      if (stored.has(`${r.kind}:${r.key}:${r.digest}`)) continue;
-      await ctx.db.insert(sourceRecords, { tenantId, orderId: order.id, kind: r.kind, key: r.key, digest: r.digest, record: r.record, importedAt: now });
-      recordsAdded++;
-    }
+    const recordsAdded = await storeRecords(ctx, tenantId, snap.records);
     const snapshotId = await ctx.db.insert(snapshots, {
       tenantId,
       orderId: order.id,
@@ -55,7 +50,6 @@ export const record = app.mutation({
       importedBy: ctx.auth.requirePrincipal().id,
       importedAt: now,
     });
-    if (order.clockStartedAt === undefined) await ctx.db.patch(orders, order.id, { clockStartedAt: now });
     await audit.record(ctx, { subject: "snapshot", id: snapshotId, type: "snapshot.recorded", data: { orderId: order.id, digest: snap.digest, recordsAdded } });
     return { status: "recorded" as const, snapshotId, digest: snap.digest, recordsAdded };
   },

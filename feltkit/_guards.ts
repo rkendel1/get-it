@@ -25,22 +25,45 @@ export function requirePerson(ctx: QueryCtx | MutationCtx) {
 }
 
 interface StoredSnapshot {
-  orderId: string;
   digest: string;
   scope: unknown;
   manifest: Array<{ kind: SourceKind; key: string; digest: string }>;
 }
 
+/** The content-addressed records a manifest names, read from the tenant's source records. */
+export async function loadRecords(ctx: QueryCtx | MutationCtx, manifest: ReadonlyArray<{ kind: SourceKind; key: string; digest: string }>, what: string) {
+  const records = [];
+  for (const m of manifest) {
+    const [r] = await ctx.db.find(sourceRecords, { kind: m.kind, key: m.key, digest: m.digest });
+    if (!r) fail("FAILED_PRECONDITION", `${what} names ${m.kind} ${m.key}, which is not stored.`);
+    records.push({ ...m, record: r.record });
+  }
+  return records;
+}
+
 /** Rebuild a stored snapshot from its manifest and the content-addressed source records. */
 export async function loadSnapshot(ctx: QueryCtx | MutationCtx, snap: StoredSnapshot): Promise<Snapshot> {
-  const stored = await ctx.db.find(sourceRecords, { orderId: snap.orderId });
-  const byKey = new Map(stored.map((r) => [`${r.kind}:${r.key}:${r.digest}`, r.record]));
-  const records = snap.manifest.map((m) => {
-    const record = byKey.get(`${m.kind}:${m.key}:${m.digest}`);
-    if (record === undefined) fail("FAILED_PRECONDITION", `Snapshot ${snap.digest} names ${m.kind} ${m.key}, which is not stored.`);
-    return { ...m, record };
-  });
-  return { scope: snap.scope as ReviewScope, manifest: snap.manifest, digest: snap.digest, records };
+  return { scope: snap.scope as ReviewScope, manifest: snap.manifest, digest: snap.digest, records: await loadRecords(ctx, snap.manifest, `Snapshot ${snap.digest}`) };
+}
+
+/** Store the records of an addressed bill set that the tenant does not hold yet. Returns how many were added. */
+export async function storeRecords(ctx: MutationCtx, tenantId: string, records: ReadonlyArray<{ kind: SourceKind; key: string; digest: string; record: unknown }>): Promise<number> {
+  let added = 0;
+  const now = Date.now();
+  for (const r of records) {
+    const [held] = await ctx.db.find(sourceRecords, { kind: r.kind, key: r.key, digest: r.digest });
+    if (held) continue;
+    await ctx.db.insert(sourceRecords, { tenantId, kind: r.kind, key: r.key, digest: r.digest, record: r.record, importedAt: now });
+    added++;
+  }
+  return added;
+}
+
+/** Order states in which fulfillment has been accepted (the clock has started). */
+const IN_FULFILLMENT = new Set(["accepted_for_fulfillment", "reviewing", "in_review", "delivered", "correcting"]);
+
+export function requireFulfillment(order: { status: string }) {
+  if (!IN_FULFILLMENT.has(order.status)) fail("FAILED_PRECONDITION", `The order is ${order.status}: it has not been accepted for fulfillment.`, { hint: "NOT_IN_FULFILLMENT" });
 }
 
 /** The order's customer-blocked intervals, from its append-only start/end events. */

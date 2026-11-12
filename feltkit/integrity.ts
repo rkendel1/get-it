@@ -10,18 +10,24 @@
  * - Every packet's digest is its run's. Every approval names its packet's digest, by a person who
  *   did not request it.
  * - Every decision names a customer-decided exception of its run.
+ * - Every intake completion recomputes from its answers and bill set, and its report matches its digest.
+ * - Every quote's digest covers its terms, and its price is runPriceMinor of its bill count.
+ * - Every quote acceptance and payment names its quote's digest; every payment is for the quoted amount.
+ * - Every fulfillment acceptance follows a payment, and its order's clock started exactly then.
  * - Every delivery names an approved packet. Every acceptance names delivered bills and charges what
  *   the contract's pricing gives. Every correction was requested within its window.
  *
  * FeltDB has no write-once collections, so this check is how drift in append-only facts is detected.
  */
-import { charge } from "../src/pricing.js";
+import { charge, runPriceMinor } from "../src/pricing.js";
+import { completeness, type AnswerState } from "../src/intake.js";
 import { digest } from "../src/canonical.js";
 import { buildPackage } from "../src/deliverables.js";
 import { review, type ReviewOutput } from "../src/review.js";
 import { snapshotDigest, type ReviewScope } from "../src/snapshot.js";
-import { acceptances, app, approvals, blockEvents, corrections, decisions, deliveries, orders, packets, runs, snapshots, sourceRecords } from "./app.js";
-import { CONTRACT, loadSnapshot, requireTenant } from "./_guards.js";
+import { acceptances, app, approvals, blockEvents, corrections, decisions, deliveries, fulfillmentAcceptances, inputBindings, intakeAnswers, intakeCompleteness, intakeSessions, orders, outcomeRequests, packets, payments, quoteAcceptances, quotes, runs, snapshots, sourceRecords } from "./app.js";
+import { CONTRACT, loadRecords, loadSnapshot, requireTenant } from "./_guards.js";
+import { quoteTerms } from "./quotes.js";
 
 export const check = app.query({
   access: "integrity.read",
@@ -30,6 +36,15 @@ export const check = app.query({
     const tenantId = requireTenant(ctx);
     const problems: string[] = [];
     const all = {
+      outcomeRequests: await ctx.db.find(outcomeRequests, {}),
+      intakeSessions: await ctx.db.find(intakeSessions, {}),
+      intakeAnswers: await ctx.db.find(intakeAnswers, {}),
+      inputBindings: await ctx.db.find(inputBindings, {}),
+      intakeCompleteness: await ctx.db.find(intakeCompleteness, {}),
+      quotes: await ctx.db.find(quotes, {}),
+      quoteAcceptances: await ctx.db.find(quoteAcceptances, {}),
+      payments: await ctx.db.find(payments, {}),
+      fulfillmentAcceptances: await ctx.db.find(fulfillmentAcceptances, {}),
       orders: await ctx.db.find(orders, {}),
       blockEvents: await ctx.db.find(blockEvents, {}),
       sourceRecords: await ctx.db.find(sourceRecords, {}),
@@ -47,6 +62,43 @@ export const check = app.query({
     }
 
     for (const r of all.sourceRecords) if (digest(r.record) !== r.digest) problems.push(`input ${r.kind} ${r.key}: content does not match its digest`);
+
+    const bindingById = new Map(all.inputBindings.map((x) => [x.id, x]));
+    for (const c of all.intakeCompleteness) {
+      if (digest(c.report) !== c.reportDigest) problems.push(`intake ${c.sessionId}: report does not match its digest`);
+      const answers = new Map<string, AnswerState>();
+      for (const r of all.intakeAnswers.filter((x) => x.sessionId === c.sessionId).sort((x, y) => x.answeredAt - y.answeredAt || (x.id < y.id ? -1 : 1))) answers.set(r.field, r.kind === "decline" ? { kind: "decline" } : { kind: "answer", value: r.value });
+      const b = bindingById.get(c.billSetBindingId);
+      if (!b) {
+        problems.push(`intake ${c.sessionId}: bill-set binding missing`);
+        continue;
+      }
+      if (c.contractDigest !== CONTRACT.digest) continue;
+      try {
+        const again = completeness(CONTRACT, answers, { manifest: b.manifest, records: await loadRecords(ctx, b.manifest, "The bill set"), digest: b.digest, counts: b.counts });
+        if (digest(again.report) !== c.reportDigest) problems.push(`intake ${c.sessionId}: report does not recompute from its answers and bill set`);
+      } catch (e) {
+        problems.push(`intake ${c.sessionId}: cannot be recomputed (${(e as Error).message})`);
+      }
+    }
+    const quoteById = new Map(all.quotes.map((x) => [x.id, x]));
+    for (const q of all.quotes) {
+      if (digest(quoteTerms(q)) !== q.digest) problems.push(`quote ${q.id}: content does not match its digest`);
+      const price = runPriceMinor(q.billCount, CONTRACT.pricing);
+      if (q.contractDigest === CONTRACT.digest && q.priceMinor !== price) problems.push(`quote ${q.id}: price ${q.priceMinor} is not runPriceMinor(${q.billCount}) = ${price}`);
+    }
+    for (const x of all.quoteAcceptances) if (quoteById.get(x.quoteId)?.digest !== x.quoteDigest) problems.push(`quote acceptance ${x.id}: does not name its quote's digest`);
+    const paymentById = new Map(all.payments.map((x) => [x.id, x]));
+    for (const p of all.payments) {
+      const q = quoteById.get(p.quoteId);
+      if (!q || q.digest !== p.quoteDigest || q.priceMinor !== p.amountMinor || q.currency !== p.currency) problems.push(`payment ${p.id}: does not match its quote`);
+    }
+    const fulfillmentByOrder = new Map(all.fulfillmentAcceptances.map((x) => [x.orderId, x]));
+    for (const f of all.fulfillmentAcceptances) if (!paymentById.has(f.paymentId)) problems.push(`fulfillment acceptance ${f.id}: payment missing`);
+    for (const o of all.orders) {
+      const f = fulfillmentByOrder.get(o.id);
+      if (o.clockStartedAt !== undefined && (!f || f.acceptedAt !== o.clockStartedAt)) problems.push(`order ${o.id}: clock started at ${o.clockStartedAt}, fulfillment was accepted at ${f ? f.acceptedAt : "never"}`);
+    }
     const snapById = new Map(all.snapshots.map((x) => [x.id, x]));
     for (const snap of all.snapshots) if (snapshotDigest(snap.scope as ReviewScope, snap.manifest) !== snap.digest) problems.push(`snapshot ${snap.id}: digest does not recompute`);
 

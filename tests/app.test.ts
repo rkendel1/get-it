@@ -8,76 +8,11 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createTestApp, type Caller, type TestApp } from "@feltdb/feltkit/testing";
 import { api } from "../feltkit/_generated/api.js";
 import { ACCOUNTING_ACTIONS } from "../src/accounting.js";
 import { digest } from "../src/canonical.js";
-import { bill, billSet } from "./_bills.js";
-
-const person = (id: string) => ({ id, type: "user" as const, roles: ["person"] });
-
-interface Org {
-  id: string;
-  owner: Caller; // customer, with authority
-  member: Caller; // customer, without commercial authority
-  operator: Caller; // get-it staff "otto"
-  reviewer: Caller; // get-it staff "olga"
-  agent: Caller; // an agent holding the operator role
-}
-
-async function newOrg(t: TestApp, name: string, ids: { owner: string; member: string }): Promise<Org> {
-  const tenancy = t.tenancy!;
-  const org = await t.provisionTenant(name, { ...person(ids.owner), email: `${ids.owner}@example.com` });
-  const actor = { ...(await tenancy.context(org.id, ids.owner))!, principalId: ids.owner };
-  const join = async (who: string, role: string) => {
-    const { token } = await tenancy.invite(actor, { email: `${who}@example.com`, role });
-    await tenancy.accept(token, { ...person(who), email: `${who}@example.com`, emailVerified: true });
-  };
-  await join(ids.member, "member");
-  await join("otto", "operator");
-  await join("olga", "operator");
-  const agentId = `agent-${org.id.slice(-6)}`;
-  await tenancy.addPrincipal(actor, { id: agentId, type: "agent", displayName: "Assistant" }, "operator");
-  const as = (id: string, type: "user" | "agent" = "user") => t.as({ id, type, roles: type === "user" ? ["person"] : [] }, { tenant: org.id });
-  return { id: org.id, owner: as(ids.owner), member: as(ids.member), operator: as("otto"), reviewer: as("olga"), agent: as(agentId, "agent") };
-}
-
-async function withApp(fn: (t: TestApp) => Promise<void>) {
-  const t = await createTestApp();
-  try {
-    await fn(t);
-  } finally {
-    await t.close();
-  }
-}
-
-async function rejectsWith(p: Promise<unknown>, code: string, hint?: string) {
-  await assert.rejects(p, (e: any) => {
-    assert.equal(e.code, code, e.message);
-    if (hint) assert.equal(e.hint ?? e.details?.hint, hint, e.message);
-    return true;
-  });
-}
-
-const ORDER = { timeZone: "America/New_York", asOfDate: "2026-11-10" };
-
-async function reviewed(org: Org, set: unknown = billSet()) {
-  const orderId = await org.operator.mutation(api.orders.create, ORDER);
-  const imported = await org.operator.mutation(api.imports.record, { orderId, billSet: set });
-  const run = await org.operator.mutation(api.runs.reviewSnapshot, { snapshotId: imported.snapshotId });
-  return { orderId, snapshotId: imported.snapshotId, ...run };
-}
-
-async function delivered(org: Org) {
-  const r = await reviewed(org);
-  const { packetId, digest } = await org.operator.mutation(api.review.request, { runId: r.runId });
-  await org.reviewer.mutation(api.review.approve, { packetId, digest });
-  const published = await org.operator.mutation(api.delivery.publish, { packetId });
-  return { ...r, packetId, packetDigest: digest, ...published };
-}
-
-/** A collection read directly from storage, beneath FeltKit's tenant scope. */
-const raw = (t: TestApp, name: string) => t.runtime.instance.handle("test.raw").collection<Record<string, any>>(name);
+import { billSet } from "./_bills.js";
+import { delivered, newOrg, ordered, raw, rejectsWith, reviewed, withApp } from "./_harness.js";
 
 test("tenant isolation: another organization's records do not exist for the caller, and every record carries an explicit tenantId", () =>
   withApp(async (t) => {
@@ -97,7 +32,7 @@ test("tenant isolation: another organization's records do not exist for the call
     await rejectsWith(globex.operator.mutation(api.runs.reviewSnapshot, { snapshotId: a.snapshotId }), "NOT_FOUND");
     await rejectsWith(globex.reviewer.mutation(api.review.approve, { packetId: a.packetId, digest: a.packetDigest }), "NOT_FOUND");
     await rejectsWith(globex.owner.mutation(api.review.decide, { runId: a.runId, exceptionId: "B6:duplicate_in_set", decision: "confirmed" }), "NOT_FOUND");
-    await rejectsWith(globex.owner.mutation(api.delivery.accept, { deliveryId: a.deliveryId, scope: "full" }), "NOT_FOUND");
+    await rejectsWith(globex.owner.mutation(api.delivery.accept, { deliveryId: a.deliveryId, packetDigest: a.packetDigest, scope: "full" }), "NOT_FOUND");
     await rejectsWith(globex.operator.mutation(api.orders.block, { orderId: a.orderId, reason: "x" }), "NOT_FOUND");
 
     for (const name of ["orders", "sourceRecords", "snapshots", "runs", "packets", "approvals", "deliveries"]) {
@@ -112,10 +47,13 @@ test("tenant isolation: another organization's records do not exist for the call
 test("idempotent re-import: the same bill set is one snapshot; a changed bill adds only itself", () =>
   withApp(async (t) => {
     const org = await newOrg(t, "Acme", { owner: "ada", member: "amy" });
-    const orderId = await org.operator.mutation(api.orders.create, ORDER);
+    const o = await ordered(org);
+    const orderId = o.orderId;
     const set = billSet();
+    // The order's first snapshot came from intake; importing the same set again writes nothing.
     const first = await org.operator.mutation(api.imports.record, { orderId, billSet: set });
-    assert.deepEqual([first.status, first.recordsAdded], ["recorded", 18]); // 11 bills + 3 vendors + 3 accounts + 1 prior bill
+    assert.deepEqual([first.status, first.snapshotId, first.recordsAdded], ["duplicate", o.snapshotId, 0]);
+    assert.equal((await raw(t, "sourceRecords").find({})).length, 18); // 11 bills + 3 vendors + 3 accounts + 1 prior bill
 
     const shuffled = { ...set, bills: [...set.bills].reverse(), vendors: [...set.vendors].reverse() };
     const again = await org.operator.mutation(api.imports.record, { orderId, billSet: shuffled });
@@ -182,15 +120,22 @@ test("every accounting mutation is refused, for every role, and the app has no o
       for (const action of ACCOUNTING_ACTIONS) await rejectsWith(caller.mutation(api.accounting.request, { action, billKey: "B1" }), "FORBIDDEN", "ACCOUNTING_MUTATION_REFUSED");
     }
     // The function inventory is fixed: a new function (say, one that posts a bill) is a reviewed change.
-    assert.deepEqual([...t.runtime.project.functions.keys()].sort(), [
+    const functions = [...t.runtime.project.functions.keys()].sort();
+    assert.deepEqual(functions, [
       "accounting:request",
-      "delivery:accept", "delivery:files", "delivery:get", "delivery:publish", "delivery:requestCorrection",
+      "delivery:accept", "delivery:download", "delivery:files", "delivery:get", "delivery:publish", "delivery:requestCorrection", "delivery:view",
       "imports:list", "imports:record",
+      "intake:answer", "intake:complete", "intake:create", "intake:get", "intake:uploadBillSet",
       "integrity:check",
-      "orders:block", "orders:clock", "orders:create", "orders:get", "orders:list", "orders:unblock",
+      "orders:acceptForFulfillment", "orders:block", "orders:clock", "orders:get", "orders:list", "orders:unblock",
+      "payments:record",
+      "quotes:accept", "quotes:create", "quotes:get",
       "review:approve", "review:decide", "review:listApprovals", "review:listPackets", "review:request",
       "runs:get", "runs:reviewSnapshot",
     ]);
+    // None of them is an accounting action under another name: payments:record records the customer's payment to get-it.
+    const accountingNames = new Set(ACCOUNTING_ACTIONS.map((a) => a.replace(".", ":")));
+    assert.deepEqual(functions.filter((f) => accountingNames.has(f)), []);
     // A full review leaves every submitted record exactly as submitted.
     const d = await delivered(org);
     for (const r of await raw(t, "sourceRecords").find({})) assert.equal(digest(r.record), r.digest);
@@ -228,31 +173,31 @@ test("acceptance: in full by the customer owner, partial by named bills, charged
     const org = await newOrg(t, "Acme", { owner: "ada", member: "amy" });
     const d = await delivered(org);
     assert.equal(d.onTime, true);
-    await rejectsWith(org.member.mutation(api.delivery.accept, { deliveryId: d.deliveryId, scope: "full" }), "FORBIDDEN");
-    await rejectsWith(org.operator.mutation(api.delivery.accept, { deliveryId: d.deliveryId, scope: "full" }), "FORBIDDEN");
-    await rejectsWith(org.owner.mutation(api.delivery.accept, { deliveryId: d.deliveryId, scope: "partial", acceptedBills: [] }), "INVALID_ARGUMENT");
-    await rejectsWith(org.owner.mutation(api.delivery.accept, { deliveryId: d.deliveryId, scope: "partial", acceptedBills: ["B1", "B404"] }), "INVALID_ARGUMENT");
+    await rejectsWith(org.member.mutation(api.delivery.accept, { deliveryId: d.deliveryId, packetDigest: d.packetDigest, scope: "full" }), "FORBIDDEN");
+    await rejectsWith(org.operator.mutation(api.delivery.accept, { deliveryId: d.deliveryId, packetDigest: d.packetDigest, scope: "full" }), "FORBIDDEN");
+    await rejectsWith(org.owner.mutation(api.delivery.accept, { deliveryId: d.deliveryId, packetDigest: d.packetDigest, scope: "partial", acceptedBills: [] }), "INVALID_ARGUMENT");
+    await rejectsWith(org.owner.mutation(api.delivery.accept, { deliveryId: d.deliveryId, packetDigest: d.packetDigest, scope: "partial", acceptedBills: ["B1", "B404"] }), "INVALID_ARGUMENT");
 
-    const partial = await org.owner.mutation(api.delivery.accept, { deliveryId: d.deliveryId, scope: "partial", acceptedBills: ["B1", "B11", "B2"] });
+    const partial = await org.owner.mutation(api.delivery.accept, { deliveryId: d.deliveryId, packetDigest: d.packetDigest, scope: "partial", acceptedBills: ["B1", "B11", "B2"] });
     assert.deepEqual([partial.billsCounted, partial.chargeMinor], [3, 25_000]);
-    await rejectsWith(org.owner.mutation(api.delivery.accept, { deliveryId: d.deliveryId, scope: "full" }), "CONFLICT", "ALREADY_ACCEPTED");
-    await rejectsWith(org.owner.mutation(api.delivery.requestCorrection, { deliveryId: d.deliveryId, reason: "late change" }), "CONFLICT", "ALREADY_ACCEPTED");
-    assert.equal((await org.owner.query(api.orders.get, { id: d.orderId }))!.status, "accepted");
+    await rejectsWith(org.owner.mutation(api.delivery.accept, { deliveryId: d.deliveryId, packetDigest: d.packetDigest, scope: "full" }), "CONFLICT", "ALREADY_ACCEPTED");
+    await rejectsWith(org.owner.mutation(api.delivery.requestCorrection, { deliveryId: d.deliveryId, packetDigest: d.packetDigest, reason: "late change" }), "CONFLICT", "ALREADY_ACCEPTED");
+    assert.equal((await org.owner.query(api.orders.get, { id: d.orderId }))!.status, "delivery_accepted");
     assert.deepEqual((await org.owner.query(api.integrity.check, {})).problems, []);
 
     const other = await newOrg(t, "Initech", { owner: "ian", member: "ivy" });
     const full = await delivered(other);
-    assert.deepEqual(await other.owner.mutation(api.delivery.accept, { deliveryId: full.deliveryId, scope: "full" }).then((x) => [x.billsCounted, x.chargeMinor]), [11, 25_000]);
+    assert.deepEqual(await other.owner.mutation(api.delivery.accept, { deliveryId: full.deliveryId, packetDigest: full.packetDigest, scope: "full" }).then((x) => [x.billsCounted, x.chargeMinor]), [11, 25_000]);
   }));
 
 test("correction: within the window and before acceptance; the corrected package needs a new approval", () =>
   withApp(async (t) => {
     const org = await newOrg(t, "Acme", { owner: "ada", member: "amy" });
     const d = await delivered(org);
-    await rejectsWith(org.member.mutation(api.delivery.requestCorrection, { deliveryId: d.deliveryId, reason: "B3 total" }), "FORBIDDEN");
-    await org.owner.mutation(api.delivery.requestCorrection, { deliveryId: d.deliveryId, reason: "B3's total was mistyped; corrected bill attached." });
+    await rejectsWith(org.member.mutation(api.delivery.requestCorrection, { deliveryId: d.deliveryId, packetDigest: d.packetDigest, reason: "B3 total" }), "FORBIDDEN");
+    await org.owner.mutation(api.delivery.requestCorrection, { deliveryId: d.deliveryId, packetDigest: d.packetDigest, reason: "B3's total was mistyped; corrected bill attached." });
     assert.equal((await org.owner.query(api.orders.get, { id: d.orderId }))!.status, "correcting");
-    await rejectsWith(org.owner.mutation(api.delivery.accept, { deliveryId: d.deliveryId, scope: "full" }), "FAILED_PRECONDITION", "CORRECTION_REQUESTED");
+    await rejectsWith(org.owner.mutation(api.delivery.accept, { deliveryId: d.deliveryId, packetDigest: d.packetDigest, scope: "full" }), "FAILED_PRECONDITION", "CORRECTION_REQUESTED");
 
     // The customer supplies a corrected bill; the re-review is a new run, packet, approval and delivery.
     const set = billSet();
@@ -266,25 +211,23 @@ test("correction: within the window and before acceptance; the corrected package
     await rejectsWith(org.operator.mutation(api.delivery.publish, { packetId: p2.packetId }), "FAILED_PRECONDITION", "NOT_APPROVED");
     await org.reviewer.mutation(api.review.approve, { packetId: p2.packetId, digest: p2.digest });
     const d2 = await org.operator.mutation(api.delivery.publish, { packetId: p2.packetId });
-    assert.equal((await org.owner.mutation(api.delivery.accept, { deliveryId: d2.deliveryId, scope: "full" })).chargeMinor, 25_000);
+    assert.equal((await org.owner.mutation(api.delivery.accept, { deliveryId: d2.deliveryId, packetDigest: p2.digest, scope: "full" })).chargeMinor, 25_000);
 
     // After the window closes, a correction is refused.
     const other = await newOrg(t, "Initech", { owner: "ian", member: "ivy" });
     const late = await delivered(other);
     await raw(t, "deliveries").update(late.deliveryId, { correctionWindowEndsAt: Date.now() - 1 });
-    await rejectsWith(other.owner.mutation(api.delivery.requestCorrection, { deliveryId: late.deliveryId, reason: "too late" }), "FAILED_PRECONDITION", "WINDOW_CLOSED");
+    await rejectsWith(other.owner.mutation(api.delivery.requestCorrection, { deliveryId: late.deliveryId, packetDigest: late.packetDigest, reason: "too late" }), "FAILED_PRECONDITION", "WINDOW_CLOSED");
   }));
 
-test("business-day clock: it starts at the first bill set, blocking pauses it, and lateness is recorded", () =>
+test("business-day clock: it starts at fulfillment acceptance, blocking pauses it, and lateness is recorded", () =>
   withApp(async (t) => {
     const org = await newOrg(t, "Acme", { owner: "ada", member: "amy" });
-    const orderId = await org.operator.mutation(api.orders.create, ORDER);
-    assert.equal((await org.owner.query(api.orders.clock, { id: orderId }))!.paused, true, "no clock before the bill set");
-    await rejectsWith(org.operator.mutation(api.orders.create, { ...ORDER, timeZone: "Mars/Olympus" }), "INVALID_ARGUMENT");
-    await rejectsWith(org.operator.mutation(api.orders.create, { ...ORDER, asOfDate: "2026-02-30" }), "INVALID_ARGUMENT");
-    await rejectsWith(org.operator.mutation(api.orders.create, { ...ORDER, dueSoonBusinessDays: 31 }), "INVALID_ARGUMENT");
-
-    const imported = await org.operator.mutation(api.imports.record, { orderId, billSet: billSet() });
+    const o = await ordered(org);
+    const orderId = o.orderId;
+    const order = (await org.owner.query(api.orders.get, { id: orderId }))!;
+    const [acceptance] = await raw(t, "fulfillmentAcceptances").find({});
+    assert.equal(order.clockStartedAt, acceptance!.acceptedAt);
     const clock = (await org.owner.query(api.orders.clock, { id: orderId }))!;
     assert.equal(clock.paused, false);
     assert.ok(clock.deadline! > Date.now());
@@ -294,13 +237,13 @@ test("business-day clock: it starts at the first bill set, blocking pauses it, a
     const blocked = (await org.owner.query(api.orders.clock, { id: orderId }))!;
     assert.deepEqual([blocked.paused, blocked.deadline], [true, null]);
 
-    const run = await org.operator.mutation(api.runs.reviewSnapshot, { snapshotId: imported.snapshotId });
+    const run = await org.operator.mutation(api.runs.reviewSnapshot, { snapshotId: o.snapshotId });
     const { packetId, digest: d } = await org.operator.mutation(api.review.request, { runId: run.runId });
     await org.reviewer.mutation(api.review.approve, { packetId, digest: d });
     await rejectsWith(org.operator.mutation(api.delivery.publish, { packetId }), "FAILED_PRECONDITION", "BLOCKED");
     await org.operator.mutation(api.orders.unblock, { orderId, reason: "vendor record received" });
 
-    // Started three weeks ago: the deadline has passed. The package is delivered and recorded as late.
+    // Accepted for fulfillment three weeks ago: the deadline has passed. The package is delivered and recorded as late.
     await raw(t, "orders").update(orderId, { clockStartedAt: Date.now() - 21 * 86_400_000 });
     const published = await org.operator.mutation(api.delivery.publish, { packetId });
     assert.equal(published.onTime, false);
@@ -308,5 +251,8 @@ test("business-day clock: it starts at the first bill set, blocking pauses it, a
     assert.ok(delivery.deadline < delivery.publishedAt);
     assert.deepEqual((delivery.report as { on_time: string[] }).on_time.length, 1);
     assert.ok(delivery.correctionWindowEndsAt > delivery.publishedAt);
-    assert.deepEqual((await org.owner.query(api.integrity.check, {})).problems, []);
+    // Moving the clock is itself drift, and the integrity check reports exactly that.
+    const problems = (await org.owner.query(api.integrity.check, {})).problems;
+    assert.equal(problems.length, 1);
+    assert.match(problems[0]!, new RegExp(`order ${orderId}: clock started at \\d+, fulfillment was accepted at ${acceptance!.acceptedAt}`));
   }));

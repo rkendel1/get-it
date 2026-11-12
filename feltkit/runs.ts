@@ -7,7 +7,7 @@ import { digest } from "../src/canonical.js";
 import { buildPackage } from "../src/deliverables.js";
 import { review } from "../src/review.js";
 import { app, audit, orders, runs, snapshots } from "./app.js";
-import { CONTRACT, loadSnapshot, requireTenant } from "./_guards.js";
+import { CONTRACT, loadSnapshot, requireFulfillment, requireTenant } from "./_guards.js";
 
 export const reviewSnapshot = app.mutation({
   access: "runs.write",
@@ -18,6 +18,7 @@ export const reviewSnapshot = app.mutation({
     if (!snap) fail("NOT_FOUND", "No such snapshot.");
     const order = await ctx.db.get(orders, snap.orderId);
     if (!order) fail("NOT_FOUND", "No such order.");
+    requireFulfillment(order);
     if (order.contractDigest !== CONTRACT.digest) fail("FAILED_PRECONDITION", `Order is bound to ${order.contract} ${order.contractDigest}; this deployment runs ${CONTRACT.key} ${CONTRACT.digest}.`);
 
     const [existing] = await ctx.db.find(runs, { snapshotId: snap.id, contractDigest: CONTRACT.digest });
@@ -38,7 +39,7 @@ export const reviewSnapshot = app.mutation({
       createdBy: ctx.auth.requirePrincipal().id,
       createdAt: Date.now(),
     });
-    if (order.status === "intake" || order.status === "correcting") await ctx.db.patch(orders, order.id, { status: "reviewing" });
+    if (order.status === "accepted_for_fulfillment" || order.status === "correcting") await ctx.db.patch(orders, order.id, { status: "reviewing" });
     await audit.record(ctx, { subject: "run", id: runId, type: "run.recorded", data: { snapshotDigest: snap.digest, outputDigest, packetDigest, summary: output.summary } });
     return { status: "recorded" as const, runId, outputDigest, packetDigest };
   },

@@ -58,9 +58,21 @@ function keyOf(kind: SourceKind, record: unknown): string {
   return r.id as string; // vendors and accounts: validated ids
 }
 
-/** Validate a raw bill set and content-address it. Throws BillSetError for invalid reference data. */
-export function buildSnapshot(scope: ReviewScope, raw: unknown, contract: FrozenContract): Snapshot {
-  const set = validateBillSet(raw, contract.limits);
+export interface AddressedBillSet {
+  readonly manifest: readonly ManifestEntry[];
+  readonly records: readonly SourceRecord[];
+  /** The digest of the manifest alone: the bill set's identity, before any review scope is bound. */
+  readonly digest: string;
+  readonly counts: { readonly bills: number; readonly vendors: number; readonly accounts: number; readonly priorBills: number };
+}
+
+/**
+ * Validate a raw bill set and content-address it. This is the one bill-set validator: intake's
+ * upload and the order's import both go through it (buildSnapshot calls it). Throws BillSetError
+ * for invalid reference data.
+ */
+export function addressBillSet(raw: unknown, contract: FrozenContract): AddressedBillSet {
+  validateBillSet(raw, contract.limits);
   const r = raw as { vendors: unknown[]; accounts: unknown[]; bills: unknown[]; priorBills?: unknown[] };
   const records = new Map<string, SourceRecord>();
   for (const [kind, list] of [["vendor", r.vendors], ["account", r.accounts], ["bill", r.bills], ["priorBill", r.priorBills ?? []]] as const) {
@@ -71,7 +83,14 @@ export function buildSnapshot(scope: ReviewScope, raw: unknown, contract: Frozen
   }
   const sorted = [...records.values()].sort(order);
   const manifest = sorted.map(({ kind, key, digest: d }) => ({ kind, key, digest: d }));
-  return { scope, manifest, digest: snapshotDigest(scope, manifest), records: sorted };
+  const count = (kind: SourceKind) => manifest.filter((m) => m.kind === kind).length;
+  return { manifest, records: sorted, digest: digest({ manifest }), counts: { bills: count("bill"), vendors: count("vendor"), accounts: count("account"), priorBills: count("priorBill") } };
+}
+
+/** Validate, content-address and bind a bill set to a review scope. */
+export function buildSnapshot(scope: ReviewScope, raw: unknown, contract: FrozenContract): Snapshot {
+  const { manifest, records } = addressBillSet(raw, contract);
+  return { scope, manifest, digest: snapshotDigest(scope, manifest), records };
 }
 
 /** The validated set a snapshot holds (re-validated from its raw records). */

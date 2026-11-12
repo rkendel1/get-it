@@ -2,10 +2,29 @@
 
 ## Implementation-Oriented Building Specification
 
-**Status:** Revision 4. The first service is `svc_bill_review_payable_prep@1.0.0`, which is **frozen**.
+**Status:** Revision 5. The first service is `svc_bill_review_payable_prep@1.0.0`, which is **frozen** and
+unchanged in this revision.
 **Date:** 2026-11-12
 **Audience:** Product, platform, fulfillment, security and operations
-**Supersedes:** Revisions 1–3
+**Supersedes:** Revisions 1–4
+
+### Changes from revision 4
+
+| # | Change | Where |
+|---|---|---|
+| 1 | **Intake exists.** Answers are validated by rules read from the contract. The bill set is uploaded through the same validator as import. Required inputs block completion. Declined, unanswered or unsupplied optional inputs become durable assumptions. Completion records a deterministic report, the contract version and its digest. | §6 |
+| 2 | **Quoting exists.** One immutable quote per completed intake, priced by `runPriceMinor`. Its digest covers every commercial term. | §9 |
+| 3 | **Quote acceptance creates the order**: owner-only, person-only, bound to the quote digest, idempotent. It does not start fulfillment. | §9, §10 |
+| 4 | **Payment is operator-recorded.** No payment provider is integrated. One payment per quote, for exactly the quoted amount. Payment enables the order but does not start fulfillment. | §13 |
+| 5 | **Fulfillment starts only at explicit acceptance** (`orders.acceptForFulfillment`), which verifies payment, complete inputs, required grants (none for this contract) and the contract digest. **The turnaround clock starts there**, no longer at the first bill set. | §10, §11 |
+| 6 | **Customer delivery boundary.** `delivery.view` and `delivery.download` give tenant-scoped, permission-checked access to exactly the approved package's files. Acceptance and correction now name the delivered package digest. | §8 |
+| 7 | `orders.create` is removed: an order exists only through intake → quote → acceptance. | §11 |
+
+The contract is unchanged, because no test found it internally inconsistent:
+- Its optional `policy.*` inputs carry no `source`. Intake reads that as answered, because only inputs whose source is
+  the customer bill set are uploaded (§6).
+- It starts the turnaround "when the first complete bill set is recorded for the order". That recording now happens
+  at acceptance for fulfillment, so the contract's words and the clock agree. A test pins this.
 
 ### Changes from revision 3
 
@@ -45,6 +64,18 @@ contracts:
 The durable commercial contract is:
 
 > What we need from you → What we will do → What you will receive → How we prove it is done.
+
+**What exists today:**
+- intake;
+- quoting;
+- quote acceptance;
+- operator-recorded payment;
+- explicit acceptance for fulfillment;
+- review, human approval and publication;
+- customer view, download, acceptance and correction.
+
+All of it is FeltKit functions tested in-process. **No customer UI and no HTTP surface has been built or exercised.**
+No payment provider is integrated, and no accounting write is possible.
 
 **The first outcome.** The customer submits the supplier bills awaiting approval, with the vendor and account
 records they name, as a Ledger-compatible bill set. get-it:
@@ -114,27 +145,24 @@ Facts come from a read-only inventory of the repositories listed in Appendix A.
 
 ## 4. Customer journeys
 
-### 4.1 First purchase (target; intake, quote and payment are not yet built)
+### 4.1 First purchase (implemented as functions; no UI)
 
-1. The customer states the outcome. It is recorded as an `OutcomeRequest`.
-2. Intake binds the contract's inputs:
-   - home currency;
-   - time zone;
-   - review date;
-   - optional policy values;
-   - the bill set.
-3. A quote states:
-   - the contract version;
-   - the bill count;
-   - the price;
-   - the turnaround;
-   - the exclusions.
-4. The customer accepts, and payment is recorded.
-5. Fulfillment runs as stored steps (§11). While customer input is outstanding, the order is blocked and the clock
-   pauses.
-6. A get-it operator who did not request the review approves the exact package.
-7. The package is published.
-8. The customer accepts it in full or in part, or requests a correction within the window.
+1. The customer starts an intake (`intake.create`), stating the outcome. It is recorded verbatim as an
+   `OutcomeRequest`.
+2. The customer answers what the contract needs (`intake.answer`): home currency, time zone, review date, and
+   optionally the policy values. They upload the bill set (`intake.uploadBillSet`).
+3. `intake.complete` refuses while a required input is missing. Otherwise it records the completeness report and every
+   assumption.
+4. An operator quotes the completed intake (`quotes.create`): bill count, price, currency, assumptions, turnaround,
+   validity.
+5. The customer's owner accepts the exact quote (`quotes.accept`). This creates the order, `awaiting_payment`, bound
+   to the intake's answers.
+6. An operator records the customer's payment (`payments.record`). The order becomes `paid`.
+7. An operator accepts the order for fulfillment (`orders.acceptForFulfillment`). This records the intake's bill set
+   as the order's first snapshot, and **the turnaround clock starts** at that same instant.
+8. Review, approval by a second operator, and publication (§11).
+9. The customer views the delivery (`delivery.view`), downloads its files (`delivery.download`), and accepts it in full
+   or in part, or requests a correction within the window.
 
 ### 4.2 Blocked work
 
@@ -261,7 +289,8 @@ Every criterion except `on_time` must pass to publish. Lateness is recorded, not
 
 **Pricing and turnaround** (assumptions carried from the revision 3 decisions):
 - $250 per run including 100 bills, then $2 per additional bill.
-- Turnaround is 2 business days from the first complete bill set.
+- Turnaround is 2 business days from "the first complete bill set recorded for the order" (the contract's words). That
+  bill set is recorded at acceptance for fulfillment, so the clock starts there and not at intake, quote or payment.
 - Business days are Monday–Friday excluding US federal holidays (observed), in the customer's time zone. The deadline
   is 23:59:59.999 local on the last counted day.
 
@@ -285,21 +314,47 @@ Every criterion except `on_time` must pass to publish. Lateness is recorded, not
 - convert currencies; and
 - match purchase orders, quantities, unit prices or receipts.
 
-## 6. Intake (not yet built)
+## 6. Intake
 
-Intake is deterministic. The contract's required inputs that the order has not bound become questions. Each question
-has a purpose, an answer type, a default and validation. Declined optional inputs become recorded assumptions (for
-example, "no prior bills supplied: duplicates are detected within the set only"). Intake ends with a completeness
-report.
+All intake rules are read from the frozen contract (`src/intake.ts`). None are restated elsewhere.
 
-The bill set is an upload validated by the same `validateBillSet` the import uses, so intake and fulfillment cannot
-disagree about what is valid. No credentials are ever intake answers. This outcome needs none.
+| Rule | Source |
+|---|---|
+| Which inputs exist | `inputs.required` and `inputs.optional` |
+| Answered or uploaded | an input whose `source` is the customer bill set (`bills`, `vendors`, `accounts`, `priorBills`) is uploaded; every other input is answered |
+| How an answer is validated | its `kind` (`iso-4217`, `iana-time-zone`, `iso-date`, `integer` with the contract's `min`/`max`). An unknown kind is a contract error, never a pass. |
+| What blocks completion | every required input |
+| What an absent optional input means | an assumption: `declined`, `not_answered` or `not_supplied`, with the contract default when it has one |
+
+Facts, each tenant-scoped with an explicit `tenantId`:
+- `outcomeRequests`;
+- `intakeSessions` (bound to the contract key and digest);
+- `intakeAnswers` (append-only; the latest per input wins);
+- `inputBindings` (the uploaded bill set's manifest; the latest binds);
+- `intakeCompleteness` (one per intake).
+
+Behaviour:
+- **Refused answers:**
+  - an out-of-range or wrong-type value;
+  - an unknown input;
+  - a bill-set input given as an answer;
+  - a declined required input;
+  - a session of another tenant (not found);
+  - a caller without `intake.write`.
+- **The bill set** goes through `addressBillSet`, the same function `buildSnapshot` uses for imports, so intake and
+  import accept identical shapes. Uploading an identical set again writes nothing.
+- **The completeness report** is a pure function of the contract, the answers and the bill set, with no times or
+  actors. The same inputs give the same report digest, whatever the order of answers or records. Completion records
+  that digest, the contract version and digest, the bindings and the assumptions.
+- **After completion**, answers and uploads are refused (`INTAKE_CLOSED`).
+- **Intake creates no order and starts no clock.**
 
 ## 7. Inputs and the accounting boundary
 
-**Inputs are supplied by the customer.**
+**Inputs are supplied by the customer**, through intake (and, for corrections, `imports.record` on an order in
+fulfillment).
 - get-it reads no accounting system and holds no accounting credentials.
-- A bill set is imported as content-addressed records.
+- A bill set is stored as content-addressed records, shared within the tenant: identical content is stored once.
 - A snapshot's digest covers the review scope and the manifest of (kind, key, digest), so re-importing the same set,
   in any order, writes nothing.
 
@@ -316,11 +371,10 @@ accounting record. This is enforced in four ways:
    unreviewed.
 4. **Acceptance.** `no_accounting_mutation` requires advisory recommendations and unchanged inputs.
 
-## 8. Deliverables and evidence
+## 8. Deliverables, evidence and the customer boundary
 
 The package is rendered deterministically from the stored review output, so it can be regenerated and checked at any
-time (`delivery.files`). The approval packet lists the sha256 of every file. Approving the packet's digest approves
-those exact bytes.
+time. The approval packet lists the sha256 of every file. Approving the packet's digest approves those exact bytes.
 
 Evidence links every result to:
 - its input digest;
@@ -328,40 +382,58 @@ Evidence links every result to:
 - the reference records used (vendor, accounts, prior bills); and
 - its exceptions.
 
+**The customer boundary** (`delivery.view`, `delivery.download`, `delivery.accept`, `delivery.requestCorrection`):
+
+| | |
+|---|---|
+| Who | members of the organization with `delivery.read`. Another tenant's order reads as absent. A non-member is refused by permission. |
+| What the view shows | order status and price; the turnaround clock; the latest delivery's files (name, sha256, bytes), summary, the pass/fail of each of the eight acceptance criteria, evidence references (snapshot and output digests, each bill's input digest), deadline, on-time, correction window, acceptance or correction; unresolved items (undecided customer questions, missing-information requests) |
+| What it never shows | operator identities, approval records, publisher, run output records, other tenants |
+| Downloads | exactly one file listed in the approval packet (or the packet itself), regenerated from the stored output and refused if it no longer matches its sha256 |
+| Acceptance, correction | each names the delivered `packetDigest`, so the customer acts on exactly what they were shown. A correction is a separate record; the delivery never changes. |
+
 **Limitation:** evidence is append-only by convention and content-addressed, but **not tamper-evident**. Nothing
 hash-chains or signs records. The integrity check detects drift; it cannot prove who caused it.
 
-## 9. Quoting and pricing (not yet built)
+## 9. Quoting and quote acceptance
 
-A quote is a snapshot of:
-- the contract version;
-- the bound inputs;
-- the bill count (from the uploaded set);
-- the price from `runPriceMinor`;
-- the turnaround and the exclusions;
-- its validity; and
-- its provenance.
+`quotes.create` (operator) quotes a completed intake, once. The quote records:
+- the contract key and digest;
+- the intake's report digest;
+- the bill count;
+- `priceMinor = runPriceMinor(billCount)`;
+- the currency (the contract's commercial currency, USD);
+- the pricing terms;
+- the intake's assumptions;
+- the turnaround in business days; and
+- `validUntil` (14 days: an operating term recorded on the quote, not a contract term).
 
-Pricing is a deterministic function. No metering product is introduced.
+Its `digest` covers every one of these. **Quotes are immutable.** No function changes one, a second `quotes.create`
+returns the same quote, and the integrity check recomputes the digest and the price.
+
+`quotes.accept` (customer `owner`, a person) names the quote digest:
+- It refuses a wrong digest, an expired quote, or a quote whose content no longer matches its digest.
+- Accepting again returns the same acceptance and order.
+- Acceptance creates the order (`awaiting_payment`), bound to the intake's answers.
+- **It does not start fulfillment.**
 
 ## 10. Order lifecycle
 
-Implemented now:
-
 ```text
-intake → reviewing → in_review → delivered → accepted
-                                    ↘ correcting → reviewing → …
+intake (no order) → quote → quotes.accept → awaiting_payment → payments.record → paid
+  → orders.acceptForFulfillment → accepted_for_fulfillment   ← the turnaround clock starts here
+  → reviewing → in_review → delivered → delivery_accepted
+                                 ↘ correcting → reviewing → …
 ```
 
-Target, with intake, quote and payment:
+The order's status and `clockStartedAt` are a projection of its facts:
+- quote acceptance, payment and fulfillment acceptance;
+- runs, packets and approvals;
+- deliveries, acceptances and corrections; and
+- block events.
 
-```text
-draft → intake → quoted → paid → accepted_for_fulfillment → reviewing ⇄ blocked
-      → in_review → delivered → delivery_accepted | correcting | cancelled
-```
-
-The order's status is a projection. The facts are its snapshots, runs, packets, approvals, block events, deliveries,
-acceptances and corrections, each a separate append-only record.
+The integrity check verifies that the clock started exactly at the recorded fulfillment acceptance. Review and import
+are refused (`NOT_IN_FULFILLMENT`) until the order is accepted for fulfillment.
 
 ## 11. Fulfillment execution: stored steps, no workflow runtime
 
@@ -369,7 +441,15 @@ Each step is one FeltKit mutation that commits one fact. Each is idempotent or r
 
 | Step | Fact | Idempotency |
 |---|---|---|
-| `imports.record` | `sourceRecords` (content-addressed), `snapshots` | same set → `duplicate` |
+| `intake.create` | `outcomeRequests`, `intakeSessions` | each call is a new request |
+| `intake.answer` | `intakeAnswers` | latest per input wins; refused after completion |
+| `intake.uploadBillSet` | `sourceRecords` (content-addressed), `inputBindings` | same set → `duplicate` |
+| `intake.complete` | `intakeCompleteness` | one per intake |
+| `quotes.create` | `quotes` | one per completed intake |
+| `quotes.accept` | `quoteAcceptances`, `orders` | one per quote |
+| `payments.record` | `payments` | one per quote; same idempotency key and terms → the payment |
+| `orders.acceptForFulfillment` | `fulfillmentAcceptances`, the order's first `snapshots` (and its clock) | one per order |
+| `imports.record` (corrections) | `sourceRecords`, `snapshots` | same set → `duplicate` |
 | `runs.reviewSnapshot` | `runs` (output, output digest, packet digest) | one run per (snapshot, contract) |
 | `review.request` | `packets` (digest, expiry) | the open request is returned |
 | `review.approve` | `approvals` | one per packet |
@@ -396,15 +476,34 @@ is relied on.
 
 | Role | May |
 |---|---|
-| `operator` (get-it staff) | open orders, import, review, request review, approve another operator's request, publish, block or unblock |
-| `owner` (customer) | read, decide duplicates, accept a delivery, request a correction |
-| `member` (customer) | read, decide duplicates |
-| agents | nothing that needs a person |
+| `operator` (get-it staff) | intake; quote; record a payment (a person); accept for fulfillment (a person); import corrections; review; request review; approve another operator's request; publish; block or unblock. Never accept a quote or a delivery for the customer. |
+| `owner` (customer) | intake; accept a quote (a person); decide duplicates; accept a delivery; request a correction; read |
+| `member` (customer) | intake; decide duplicates; read |
+| agents | nothing that needs a person: approval, quote acceptance, payment, fulfillment acceptance, delivery acceptance, correction |
 
-## 13. Billing (charge computation built; invoicing not built)
+## 13. Payment and billing
 
-An acceptance records the bills counted and the charge the contract's pricing gives. The integrity check recomputes
-it. Issuing a customer invoice and recording payment are later work.
+**Payment is operator-recorded. No payment provider is integrated.** `payments.record` is run by an operator, who must
+be a person. It records:
+- the amount and currency, which must equal the quote's;
+- the method (`bank_transfer`, `check`, `card_offline`, `cash`, `other`) and reference;
+- the operator and the time;
+- the quote digest; and
+- an idempotency key.
+
+There is one payment per quote. Recording again with the same key and terms returns it, and anything else is a
+conflict.
+
+**Payment enables the order (`paid`) and does not accept it for fulfillment.** This is the customer paying get-it for
+the service. It is not an accounting action on the customer's books, which get-it never takes.
+
+An acceptance of a delivery records the bills counted and the charge the contract's pricing gives. The integrity
+check recomputes it.
+
+**Not built:**
+- issuing a customer invoice;
+- refunds and credits;
+- reconciling the quote price with delivery charges (a partial acceptance charges less than the quote).
 
 ## 14. Tenancy and security
 
@@ -447,13 +546,15 @@ FeltDB (through FeltKit): append-only facts, tenant-scoped
 ## 17. Core data model
 
 Implemented collections:
+- `outcomeRequests`, `intakeSessions`, `intakeAnswers`, `inputBindings`, `intakeCompleteness`;
+- `quotes`, `quoteAcceptances`, `payments`, `fulfillmentAcceptances`;
 - `orders`, `blockEvents`;
 - `sourceRecords`, `snapshots`;
 - `runs`, `packets`, `approvals`, `decisions`;
 - `deliveries`, `acceptances`, `corrections`;
 - `audit`.
 
-Every collection carries `tenantId`. Target additions: `OutcomeRequest`, `IntakeSession`, `Quote`, `Payment`, `Invoice`.
+Every collection carries `tenantId`. Target additions: `Invoice`, `Refund`.
 
 ## 18. Non-goals
 
@@ -493,11 +594,25 @@ All are automated in `tests/`:
 12. Every accounting action is refused for every role, and the function list is fixed.
 13. Acceptance works in full and in part. A correction is accepted within the window and before acceptance, and needs
     a new approval.
+14. Intake answers are refused when out of the contract's range, of the wrong type, unknown, a bill-set field, a
+    declined required input, or from another tenant.
+15. Re-uploading the same bill set is idempotent. Intake cannot complete with required inputs missing (each is named).
+    Declined optional inputs become assumptions. The completeness report is deterministic.
+16. A quote equals `runPriceMinor` for the bill count, and its terms and assumptions are immutable.
+17. Quote acceptance is owner-only, person-only and digest-bound. Accepting twice creates one order. An expired quote
+    is refused.
+18. Payment is recorded once, by an operator person, for the quoted amount. It does not start fulfillment.
+19. The clock starts only at fulfillment acceptance, which requires payment and an operator person. Blocking still
+    pauses it.
+20. Customer delivery access is tenant-scoped and permission-checked. It exposes nothing internal. Downloads are
+    exactly the packet's files. Acceptance and correction are bound to the delivered digest. A correction never
+    changes the delivery.
+21. No new accounting mutation function: the function list is fixed, and none is an accounting action.
 
 ## 21. Open decisions
 
 - Intake UX for uploading the bill set: JSON as specified, or a CSV mapping to the same format.
-- Payment for the first market: an operator-recorded payment against an issued invoice is the proposed default.
+- Whether a partial delivery acceptance refunds the difference from the paid quote, or credits it.
 - Retention, deletion and export obligations for customers' financial data.
 - Which FeltDB authority hosts production. Embedded local is the verified path.
 
@@ -507,8 +622,10 @@ All are automated in `tests/`:
 2. ~~Freeze the first contract with executable acceptance tests~~ (done: `svc_bill_review_payable_prep@1.0.0`).
 3. ~~Build the review engine, package, stored-step execution, approvals, delivery, acceptance, correction, blocked
    clock and integrity~~ (done: Appendix C).
-4. **Next:** add intake, quoting and delivery to the customer (Appendix C, "Next step").
-5. Then add operator queues, then a second outcome.
+4. ~~Add intake, quoting, operator-recorded payment, fulfillment acceptance and customer delivery access~~ (done:
+   revision 5).
+5. **Next:** an HTTP and UI surface over these functions, verified end to end (Appendix C, "Next step").
+6. Then invoicing and refunds, operator queues, and a second outcome.
 
 ---
 
@@ -562,7 +679,7 @@ A Ledger export maps directly, with `currency` set to the organization's base cu
 ## Appendix C: Implementation status and limits
 
 Implemented and tested by `npm test` (codegen, typecheck, then the tests on a real FeltKit 0.3.27 runtime with a fresh
-FeltDB per test):
+FeltDB per test, through FeltKit's in-process test harness):
 
 | Area | Code | Tests |
 |---|---|---|
@@ -571,34 +688,36 @@ FeltDB per test):
 | Business days and deadlines | `src/calendar.ts` | `tests/calendar.test.ts` |
 | Pricing and charging | `src/pricing.ts` | `tests/pricing.test.ts` |
 | Ledger-compatible bill sets | `src/bills.ts`, `src/snapshot.ts` | `tests/bills.test.ts` |
+| Intake rules from the contract | `src/intake.ts` | `tests/intake.test.ts` |
 | Review engine | `src/review.ts` | `tests/review.test.ts` |
 | Package and acceptance criteria | `src/deliverables.ts`, `src/acceptance.ts` | `tests/acceptance.test.ts` |
 | Accounting boundary | `src/accounting.ts`, `feltkit/accounting.ts` | `tests/accounting.test.ts`, `tests/app.test.ts` |
-| App: tenancy, imports, runs, review, delivery, acceptance, correction, clock, integrity | `feltkit/*.ts` | `tests/app.test.ts` |
+| Intake, quotes, payment, fulfillment acceptance | `feltkit/intake.ts`, `quotes.ts`, `payments.ts`, `orders.ts` | `tests/commerce.test.ts` |
+| Customer delivery boundary | `feltkit/delivery.ts` | `tests/delivery-view.test.ts` |
+| Tenancy, imports, runs, review, delivery, clock, integrity | `feltkit/*.ts` | `tests/app.test.ts` |
 
 **Not verified:**
-- No real customer export has been reviewed. The fixtures are hand-written in Ledger's shape.
-- Behaviour near the 1000-bill limit, and the size of a stored run, are not load-tested.
-- No HTTP or UI surface has been exercised. All tests call functions through FeltKit's in-process test harness.
-- The turnaround clock starts at the first complete bill set, because there is no quote or payment yet.
-- Late and blocked behaviour is tested by moving stored times in tests, not by waiting.
+- **No HTTP or UI surface has been exercised.** Every test calls FeltKit functions in-process. FeltKit serves these
+  functions over HTTP, but no request has been made against a running get-it server, and no customer UI exists.
+- **No payment provider.** Payments are operator-recorded. Nothing checks that money actually arrived.
+- **No real data.** No real customer or Ledger export has been reviewed. The fixtures are hand-written in Ledger's
+  shape.
+- **Scale.** Behaviour near the 1000-bill limit, the size of a stored run, and the per-record source-record lookups at
+  that size are not load-tested.
+- **Time-based behaviour** (quote expiry, review-request expiry, lateness, the correction window) is tested by moving
+  stored times in tests, not by waiting. Quote expiry is tested on a consistently re-digested quote; an in-place edit
+  is refused as tampered.
+- **Refund and credit** of the difference between a paid quote and a partial acceptance is not modelled.
 
-**Next step: intake, quoting and delivery.**
-1. Add `OutcomeRequest` and `IntakeSession` collections, and an `intake` module:
-   - `intake.start`;
-   - `intake.answer` for home currency, time zone, review date and the policy values, validated against the contract's
-     ranges as `orders.create` does today;
-   - `intake.uploadBillSet`, reusing `buildSnapshot`/`validateBillSet` so intake and import agree; and
-   - `intake.complete`, producing a completeness report and the recorded assumptions.
-2. Add `Quote` (`quotes.create` from a completed intake, using `runPriceMinor` on the uploaded bill count, plus
-   validity, turnaround and exclusions) and `quotes.accept` (customer owner, a person, idempotent).
-3. Add `payments.record` (operator-recorded payment) that creates the order from the accepted quote. Move the clock
-   start to "accepted for fulfillment and inputs complete", as the contract says.
-4. Add a customer delivery view over `delivery.get` and `delivery.files`, with download of each file, and the accept,
-   partial-accept and correction actions already implemented.
-5. Write the tests first, in the existing style:
-   - an intake answer outside the contract's range is refused;
-   - a quote matches `runPriceMinor`;
-   - accepting a quote twice creates one order;
-   - the clock starts at fulfillment acceptance; and
-   - a customer can download exactly the files listed in the approval packet.
+**Next step: a verified HTTP and customer UI surface.**
+1. Start the FeltKit server for get-it (`feltkit dev` / `feltkit start`) in a test.
+2. Drive the full path over HTTP with real sessions for an owner, a member, two operators and a non-member:
+   intake → quote → accept → payment → fulfillment → review → approval → publish → view, download → accept or correct.
+3. Assert the same refusals the in-process tests assert:
+   - tenant isolation;
+   - permissions;
+   - person-only steps;
+   - digest binding;
+   - downloads limited to the packet's files.
+4. Then build the customer UI as a FeltKit client over `intake.*`, `quotes.get`/`accept` and
+   `delivery.view`/`download`/`accept`/`requestCorrection`. No new server function is needed for it.
