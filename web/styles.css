@@ -132,3 +132,15 @@ button.link { border: none; background: none; color: var(--brand); padding: 0.2r
 .correction { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 1rem; }
 .correction button { align-self: flex-start; }
 .signin { min-width: 0; }
+
+.original { margin: 0.25rem 0 0.75rem; padding: 0.75rem 1rem; border-left: 4px solid var(--brand); background: #f6f9fa; border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 1.1rem; }
+.next { color: var(--muted); margin: 0; }
+.examples { padding-left: 1.1rem; color: var(--muted); margin: 0.25rem 0; columns: 2; column-gap: 1.5rem; }
+.examples li { break-inside: avoid; margin: 0.15rem 0; }
+@media (max-width: 760px) { .examples { columns: 1; } }
+.examples-toggle { margin: 0.5rem 0; color: var(--muted); }
+.availability { font-size: 0.9rem; color: var(--muted); border-top: 1px solid var(--line); padding-top: 0.75rem; margin-top: 1rem; }
+.question-group + .question-group { margin-top: 1rem; }
+.detail-form { margin-top: 1rem; }
+.detail-form select { flex: 0 1 200px; }
+.detail-form input.currency { flex: 0 0 5rem; }

@@ -14,6 +14,13 @@ import { assertFitsWidth, createOrganizationInBrowser, sha256, signUpInBrowser, 
 
 const BILLS = Buffer.from(JSON.stringify(billSet()));
 
+/** The bill-review intake a task continues in (storage read only to find its id). */
+async function sessionOf(app: BrowserApp, requestId: string) {
+  const choice = (await stored(app.http, "taskServiceChoices")).find((c) => c.requestId === requestId && c.choice === "accepted");
+  assert.ok(choice?.sessionId, "the task continues in an intake");
+  return choice.sessionId as string;
+}
+
 /** The bytes the browser saved for a download. */
 async function downloaded(d: Download): Promise<Buffer> {
   const chunks: Buffer[] = [];
@@ -86,10 +93,14 @@ test("a customer describes the outcome, provides the inputs, accepts the quote, 
     await page.getByRole("heading", { name: "What do you need done?" }).waitFor();
     assert.equal(await page.getByLabel("Describe what you need done").inputValue(), "Review our pending supplier bills before Friday's payment run.");
     await app.shot(page, "02-home");
-    await page.getByRole("button", { name: "Start my request" }).click();
+    await page.getByRole("button", { name: "Send my request" }).click();
+    // The request, in the customer's words; our bill-review service is offered, not chosen for them.
+    await page.getByTestId("original-request").filter({ hasText: "Review our pending supplier bills before Friday's payment run." }).waitFor();
+    await page.getByRole("heading", { name: "Our service: Bill review and payable preparation" }).waitFor();
+    await app.shot(page, "02b-service-offered");
+    await page.getByRole("button", { name: "Yes, continue with this service" }).click();
     await page.getByTestId("request-status").filter({ hasText: "Awaiting your information" }).waitFor();
-    const sessionId = page.url().split("#/requests/")[1]!;
-    assert.ok(sessionId);
+    const sessionId = await sessionOf(app, page.url().split("#/tasks/")[1]!);
 
     // 4–5. Information: required and optional items, why each is needed, and the bill set.
     const missing = page.getByTestId("missing");
@@ -195,9 +206,10 @@ test("a customer requests a correction in the browser, then accepts the correcte
     const { owner } = await tenantOf(app, "cora@initech.test");
     const { otto, olga } = await operators(app, owner, "initech");
     await page.getByLabel("Describe what you need done").fill("Check this week's bills.");
-    await page.getByRole("button", { name: "Start my request" }).click();
+    await page.getByRole("button", { name: "Send my request" }).click();
+    await page.getByRole("button", { name: "Yes, continue with this service" }).click();
     await page.getByTestId("request-status").filter({ hasText: "Awaiting your information" }).waitFor();
-    const sessionId = page.url().split("#/requests/")[1]!;
+    const sessionId = await sessionOf(app, page.url().split("#/tasks/")[1]!);
     await provideInformation(page);
     await page.getByRole("button", { name: "Finish and request a quote" }).click();
     const quote = await otto.mutation("quotes:create", { sessionId });

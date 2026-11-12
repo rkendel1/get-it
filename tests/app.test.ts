@@ -125,13 +125,14 @@ test("every accounting mutation is refused, for every role, and the app has no o
       "accounting:request",
       "delivery:accept", "delivery:download", "delivery:files", "delivery:get", "delivery:publish", "delivery:requestCorrection", "delivery:view",
       "imports:list", "imports:record",
-      "intake:answer", "intake:complete", "intake:create", "intake:get", "intake:list", "intake:uploadBillSet",
+      "intake:answer", "intake:complete", "intake:create", "intake:get", "intake:uploadBillSet",
       "integrity:check",
       "orders:acceptForFulfillment", "orders:block", "orders:clock", "orders:get", "orders:list", "orders:unblock",
       "payments:record",
       "quotes:accept", "quotes:create", "quotes:get",
       "review:approve", "review:decide", "review:listApprovals", "review:listPackets", "review:request",
       "runs:get", "runs:reviewSnapshot",
+      "tasks:addDetail", "tasks:assess", "tasks:attach", "tasks:create", "tasks:get", "tasks:list", "tasks:respondToService",
     ]);
     // None of them is an accounting action under another name: payments:record records the customer's payment to get-it.
     const accountingNames = new Set(ACCOUNTING_ACTIONS.map((a) => a.replace(".", ":")));

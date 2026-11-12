@@ -26,7 +26,7 @@
 import { feltkit, s } from "@feltdb/feltkit";
 
 /** What everyone in an organization reads: their intake, quote, order and delivery (customer-safe views). */
-const READ = ["intake.read", "quotes.read", "orders.read", "decisions.read", "delivery.read"];
+const READ = ["tasks.read", "intake.read", "quotes.read", "orders.read", "decisions.read", "delivery.read", "files.read"];
 
 /**
  * Internal records: snapshots, runs (with their full output and author), review packets and
@@ -39,19 +39,19 @@ const INTERNAL_READ = ["payments.read", "imports.read", "runs.read", "review.rea
 const ASK = ["accounting.request"];
 
 /** Customer people with commercial authority: intake, accept a quote, decide duplicates, accept a delivery, request a correction. */
-const OWNER = [...READ, ...ASK, "intake.write", "quotes.accept", "decisions.record", "delivery.accept", "delivery.correct"];
+const OWNER = [...READ, ...ASK, "tasks.write", "files.write", "intake.write", "quotes.accept", "decisions.record", "delivery.accept", "delivery.correct"];
 
 /** Customer people without commercial authority: intake, read, and decide duplicates. */
-const MEMBER = [...READ, ...ASK, "intake.write", "decisions.record"];
+const MEMBER = [...READ, ...ASK, "tasks.write", "files.write", "intake.write", "decisions.record"];
 
 /** get-it staff working in a customer's organization. They never accept a quote or a delivery for the customer. */
-const OPERATOR = [...READ, ...INTERNAL_READ, ...ASK, "intake.write", "quotes.write", "payments.record", "orders.accept", "orders.write", "imports.write", "runs.write", "review.request", "review.approve", "delivery.publish"];
+const OPERATOR = [...READ, ...INTERNAL_READ, ...ASK, "tasks.assess", "intake.write", "quotes.write", "payments.record", "orders.accept", "orders.write", "imports.write", "runs.write", "review.request", "review.approve", "delivery.publish"];
 
 export const ROLES = ["owner", "member", "operator"] as const;
 
 export const app = feltkit({
   name: "get-it",
-  description: "Outcome-driven service business. First outcome: bill review and payable preparation over Ledger-compatible bill sets.",
+  description: "On-demand task fulfillment: customers say what they need done; get-it scopes it, quotes what it can fulfil, and delivers. First supported service: bill review and payable preparation.",
   roles: {
     person: [],
     owner: [...OWNER, "tenant.*"],
@@ -65,6 +65,8 @@ export const app = feltkit({
     accounts: { roles: ["person"], email: { from: "accounts@get-it.invalid" } },
     tenant: { name: "organization", roles: ROLES, create: "anyone" },
   },
+  // FeltKit's organization-scoped file service: what customers attach to their task requests.
+  services: { files: true },
 });
 
 const TENANT = { tenantId: s.string({ minLength: 1 }) };
@@ -222,6 +224,95 @@ export const fulfillmentAcceptances = app.collection(
     acceptedAt: s.number(),
   },
   { tenant: true, unique: [["tenantId", "orderId"]] },
+);
+
+/**
+ * A task request: what a customer needs done, in their own words, exactly as they wrote it. It exists
+ * independently of any service contract, quote or order; it is never rewritten. Everything learned
+ * later (details, resources, assessments, the link to a service) is a separate record about it.
+ */
+export const taskRequests = app.collection(
+  "taskRequests",
+  {
+    ...TENANT,
+    text: s.string({ minLength: 1, maxLength: 4000 }),
+    requestedBy: s.string(),
+    requestedAt: s.number(),
+  },
+  { tenant: true },
+);
+
+/** Something the customer told us about a task: an answer to a scoping question, a constraint, a preference, a deadline, a budget, a note. Append-only. */
+export const taskDetails = app.collection(
+  "taskDetails",
+  {
+    ...TENANT,
+    requestId: s.string(),
+    kind: s.enum(["answer", "constraint", "preference", "deadline", "budget", "note"] as const),
+    questionId: s.optional(s.string()),
+    value: s.unknown(),
+    providedBy: s.string(),
+    providedAt: s.number(),
+  },
+  { tenant: true, indexes: [{ fields: ["tenantId", "requestId"] }] },
+);
+
+/** A resource the customer provided for a task: a file (held by FeltKit's file service) or a link. Append-only. */
+export const taskResources = app.collection(
+  "taskResources",
+  {
+    ...TENANT,
+    requestId: s.string(),
+    kind: s.enum(["file", "link"] as const),
+    name: s.string({ minLength: 1, maxLength: 200 }),
+    fileId: s.optional(s.string()),
+    url: s.optional(s.string({ maxLength: 2000 })),
+    contentType: s.optional(s.string()),
+    size: s.optional(s.integer({ minimum: 0 })),
+    checksum: s.optional(s.string()),
+    providedBy: s.string(),
+    providedAt: s.number(),
+  },
+  { tenant: true, indexes: [{ fields: ["tenantId", "requestId"] }] },
+);
+
+/** get-it's recorded judgement of a task: whether and how it can be fulfilled, what it still needs. Made by a person. Append-only; the latest wins. */
+export const taskAssessments = app.collection(
+  "taskAssessments",
+  {
+    ...TENANT,
+    requestId: s.string(),
+    outcome: s.enum(["more_information_required", "fulfillment_path_identified", "requires_external_provider", "requires_manual_review", "not_currently_fulfillable"] as const),
+    service: s.optional(s.string()),
+    reasons: s.array(s.string({ maxLength: 1000 })),
+    questions: s.array(s.object({ id: s.string(), text: s.string(), purpose: s.enum(["quote", "execute", "optional", "resource"] as const) })),
+    arrangements: s.array(s.string({ maxLength: 1000 })),
+    assessedBy: s.string(),
+    assessedAt: s.number(),
+  },
+  { tenant: true, indexes: [{ fields: ["tenantId", "requestId"] }] },
+);
+
+/**
+ * The customer's answer to a service offered for their task: accepted (the task continues in that
+ * service's intake, linked by `sessionId`) or declined. One per task: the explicit, durable link
+ * between a general task and a specialized service. A task has at most one accepted choice.
+ */
+export const taskServiceChoices = app.collection(
+  "taskServiceChoices",
+  {
+    ...TENANT,
+    requestId: s.string(),
+    service: s.string(),
+    /** What the offer rested on: an operator's assessment, or the customer choosing a suggested service. */
+    basis: s.enum(["assessment", "suggestion"] as const),
+    choice: s.enum(["accepted", "declined"] as const),
+    sessionId: s.optional(s.string()),
+    chosenBy: s.string(),
+    chosenAt: s.number(),
+  },
+  // At most one accepted choice per task is enforced in tasks.respondToService; a declined offer can be offered again later.
+  { tenant: true, indexes: [{ fields: ["tenantId", "requestId"] }] },
 );
 
 /** One review order, created by quote acceptance and bound to the frozen contract and the intake's bindings. */
@@ -412,6 +503,6 @@ export const corrections = app.collection(
 );
 
 export const audit = app.auditTrail("audit", {
-  subjects: ["intake", "quote", "payment", "order", "snapshot", "run", "packet", "decision", "delivery"] as const,
+  subjects: ["task", "intake", "quote", "payment", "order", "snapshot", "run", "packet", "decision", "delivery"] as const,
   tenant: true,
 });

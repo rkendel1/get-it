@@ -12,21 +12,14 @@ import { BillSetError } from "../src/bills.js";
 import { digest } from "../src/canonical.js";
 import { completeness, inputSpecs, validateAnswer, type AnswerState } from "../src/intake.js";
 import { addressBillSet, type AddressedBillSet } from "../src/snapshot.js";
-import { app, audit, inputBindings, intakeAnswers, intakeCompleteness, intakeSessions, orders, outcomeRequests, quoteAcceptances, quotes } from "./app.js";
+import { app, audit, inputBindings, intakeAnswers, intakeCompleteness, intakeSessions, outcomeRequests, quoteAcceptances, quotes } from "./app.js";
 import { CONTRACT, loadRecords, requireTenant, storeRecords } from "./_guards.js";
+import { startIntake } from "./_intake.js";
 
 export const create = app.mutation({
   access: "intake.write",
   args: { request: s.string({ minLength: 1, maxLength: 4000 }) },
-  handler: async (ctx, a) => {
-    const tenantId = requireTenant(ctx);
-    const by = ctx.auth.requirePrincipal().id;
-    const now = Date.now();
-    const outcomeRequestId = await ctx.db.insert(outcomeRequests, { tenantId, text: a.request, contract: CONTRACT.key, requestedBy: by, requestedAt: now });
-    const sessionId = await ctx.db.insert(intakeSessions, { tenantId, outcomeRequestId, contract: CONTRACT.key, contractDigest: CONTRACT.digest, createdBy: by, createdAt: now });
-    await audit.record(ctx, { subject: "intake", id: sessionId, type: "intake.created", data: { contract: CONTRACT.key } });
-    return { sessionId, outcomeRequestId };
-  },
+  handler: async (ctx, a) => startIntake(ctx, requireTenant(ctx), a.request),
 });
 
 async function openSession(ctx: QueryCtx | MutationCtx, sessionId: string) {
@@ -170,34 +163,3 @@ export const get = app.query({
   },
 });
 
-/**
- * The organization's requests, newest first: what was asked, whether intake is complete, the quote
- * and the order once they exist. Without it a customer who leaves an unfinished intake cannot find
- * it again. Customer-safe: no actors, only the customer's own words and states.
- */
-export const list = app.query({
-  access: "intake.read",
-  args: {},
-  handler: async (ctx) => {
-    requireTenant(ctx);
-    const sessions = (await ctx.db.find(intakeSessions, {})).sort((a, b) => b.createdAt - a.createdAt || (a.id < b.id ? 1 : -1));
-    const out = [];
-    for (const session of sessions) {
-      const request = await ctx.db.get(outcomeRequests, session.outcomeRequestId);
-      const [done] = await ctx.db.find(intakeCompleteness, { sessionId: session.id });
-      const [quote] = done ? await ctx.db.find(quotes, { completenessId: done.id }) : [];
-      const [acceptance] = quote ? await ctx.db.find(quoteAcceptances, { quoteId: quote.id }) : [];
-      const order = acceptance ? await ctx.db.get(orders, acceptance.orderId) : null;
-      out.push({
-        sessionId: session.id,
-        request: request?.text ?? "",
-        createdAt: session.createdAt,
-        complete: Boolean(done),
-        quote: quote ? { id: quote.id, priceMinor: quote.priceMinor, currency: quote.currency } : null,
-        orderId: order?.id ?? null,
-        orderStatus: order?.status ?? null,
-      });
-    }
-    return out;
-  },
-});

@@ -12,4 +12,6 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # The browser tests drive Chromium through the pinned Playwright.
+      - run: npx playwright install --with-deps chromium
       - run: npm test

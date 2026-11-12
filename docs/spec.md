@@ -2,11 +2,29 @@
 
 ## Implementation-Oriented Building Specification
 
-**Status:** Revision 6. The first service is `svc_bill_review_payable_prep@1.0.0`, which is **frozen** and
-unchanged in this revision.
+**Status:** Revision 7. get-it is a general task service. Its first supported service is
+`svc_bill_review_payable_prep@1.0.0`, which is **frozen** and unchanged in this revision.
 **Date:** 2026-11-12
 **Audience:** Product, platform, fulfillment, security and operations
-**Supersedes:** Revisions 1–5
+**Supersedes:** Revisions 1–6
+
+### Changes from revision 6: general task requests and the customer interface
+
+| # | Change | Where |
+|---|---|---|
+| 1 | **The customer interface exists** and is verified in a real browser against the running server: FeltKit's sign-up, verification, invitations and organizations (cookie sessions, CSRF), then the whole journey. | §4, Appendix C |
+| 2 | **Customers start from "What do you need done?"**, not from a service. A **task request** keeps the description exactly as written and exists independently of any service, quote or order. | §4.0, §5.0 |
+| 3 | Around a task: details (answers, constraints, preferences, deadline, budget, notes), resources (files through FeltKit's file service, links), **assessments made by a person**, and at most one accepted **service choice**, which links the task to that service's intake. | §5.0 |
+| 4 | **No automatic routing.** A description that names the bill-review service's subject in whole words lets the customer choose that service. The suggestion is computed, never stored as an assessment, and never chosen for them. Everything else is reviewed by a person. | §5.0 |
+| 5 | `intake.list` is removed: `tasks.list` lists every request, quoted or not. `intake.create` is unchanged; it and accepting a service share one helper. | §5.0 |
+| 6 | Account e-mail, the customer-safe reads and the HTTP proof from revision 6 are unchanged. Sabotage covers 18 guards. | Appendix C |
+
+What is and is not available, plainly:
+- **Any task can be submitted, kept, listed, detailed, attached to and scoped.**
+- **Only bill review and payable preparation can be quoted, bought and delivered.** Every other task stays a request
+  that a person scopes. The customer sees the honest state: submitted, more information needed, under review,
+  needs an outside professional, or not something we can do right now. A task becomes purchasable only by entering a
+  real service with a frozen contract.
 
 ### Changes from revision 5: the customer transaction is proven over HTTP
 
@@ -85,9 +103,11 @@ The durable commercial contract is:
 - review, human approval and publication;
 - customer view, download, acceptance and correction.
 
-All of it is proven end to end **over HTTP** against the running FeltKit server, with real accounts and sessions
-(revision 6), as well as by in-process tests. **No customer UI exists yet.** No payment provider is integrated, and no
-accounting write is possible.
+- general task requests (revision 7), in front of all of the above.
+
+All of it is proven end to end in a **real browser** and **over HTTP** against the running FeltKit server, with real
+accounts and sessions, as well as by in-process tests. No payment provider is integrated, and no accounting write is
+possible.
 
 **The first outcome.** The customer submits the supplier bills awaiting approval, with the vendor and account
 records they name, as a Ledger-compatible bill set. get-it:
@@ -157,7 +177,26 @@ Facts come from a read-only inventory of the repositories listed in Appendix A.
 
 ## 4. Customer journeys
 
-### 4.1 First purchase (implemented as functions; no UI)
+### 4.0 Any task (implemented; browser-verified)
+
+1. The visitor sees "What do you need done?" and examples of what people ask. The examples illustrate; they are not a
+   list of services. They create an account and an organization (FeltKit's screens).
+2. They describe the task in their own words and send it (`tasks.create`). It is kept exactly as written, listed in
+   their requests (`tasks.list`), and shown as **Submitted**. No quote and no order exist.
+3. They add details, files and links whenever they like (`tasks.addDetail`, `tasks.attach`).
+4. A person assesses it (`tasks.assess`). The page shows the actual state:
+   - **more information needed**, with the questions grouped as needed to price, needed to do the work, optional, or
+     things they can provide;
+   - **under review** (also once every pricing question is answered);
+   - **needs an outside professional**, which says nobody has been arranged;
+   - **not something we can do right now**, with the reason;
+   - **a service offered**.
+5. If one of get-it's services is offered (by a person, or because their words name its subject), they choose:
+   continue with it (`tasks.respondToService`), which starts that service's intake linked to the task, or say it is
+   not what they need, which sends the task to a person.
+6. In the bill-review service, the journey continues as in §4.1, inside the task.
+
+### 4.1 Bill review: first purchase (implemented; browser-verified)
 
 1. The customer starts an intake (`intake.create`), stating the outcome. It is recorded verbatim as an
    `OutcomeRequest`.
@@ -183,6 +222,35 @@ When the review cannot proceed (unknown vendor or account, a malformed bill to r
 - a missing-information request names exactly what is needed;
 - the operator may record the order as blocked, which pauses the turnaround clock;
 - after ten blocked business days, the order is cancelled or re-quoted.
+
+## 5.0 Task requests
+
+A task request is the customer's need, independent of any contract. Its records, each tenant-scoped with an explicit
+`tenantId` and append-only:
+
+| Record | Holds | Rules |
+|---|---|---|
+| `taskRequests` | the description **exactly as written** (whitespace included), who sent it, when | never rewritten; whitespace-only is refused |
+| `taskDetails` | answers, constraints, preferences, a deadline (date), a budget (integer minor units and currency), notes | validated by kind; an answer must name a question that was asked |
+| `taskResources` | files (held by FeltKit's organization-scoped file service; the record keeps the file id, name, size and checksum) and links (http/https only) | 3 MB per file |
+| `taskAssessments` | an outcome, the reasons, the questions (each `quote`, `execute`, `optional` or `resource`), what get-it would arrange, who assessed, when | operators only, people only; a service only if it is a real one; "more information" must ask something |
+| `taskServiceChoices` | the customer's acceptance or refusal of an offered service, what the offer rested on (an assessment or a suggestion), the linked intake | at most one accepted per task; accepting again returns the same intake |
+
+**State**, derived from these records only (`src/tasks.ts`):
+- linked to an intake: `fulfillment_path_identified` while it gathers inputs, then `ready_to_quote`;
+- else the latest assessment, where `more_information_required` becomes `requires_manual_review` once every pricing
+  question is answered, and a declined offered service becomes `requires_manual_review`;
+- with no assessment, `ready_to_scope` (shown as "Submitted").
+
+**Offers.** A service can be offered only if it is one of get-it's frozen, active contracts (`feltkit/_paths.ts`).
+- An operator's assessment can offer it.
+- With no assessment at all, a description naming the service's subject in **whole words** offers it as a suggestion.
+  So "Billing system migration" is not offered bill review, while "these invoices" is.
+- The suggestion is never stored as an assessment. It is a choice the customer makes, and declining it sends the task
+  to a person.
+
+**Not built:** automatic scoping of other task types, any other fulfillment service, customer download of their own
+attachments, and an operator interface (operators act through the API).
 
 ## 5. Service contracts
 
@@ -644,7 +712,8 @@ All are automated in `tests/`:
 4. ~~Add intake, quoting, operator-recorded payment, fulfillment acceptance and customer delivery access~~ (done:
    revision 5).
 5. ~~Prove the customer transaction over HTTP~~ (done: revision 6).
-6. **Next:** the customer UI, as a FeltKit client over the existing functions (Appendix C, "Next step").
+6. ~~The customer UI~~ and ~~general task requests~~ (done: revision 7).
+7. **Next:** see Appendix C, "Next step".
 7. Then define partial-acceptance settlement, then payment-provider integration, invoicing and refunds.
 
 ---
@@ -761,17 +830,36 @@ FeltKit server with real accounts:
   by moving stored times.
 - **Partial-acceptance settlement** is undefined (§21).
 
-**Next step: the customer UI.** A FeltKit client over the functions the HTTP tests prove, with no new server
-function. It should follow the business:
-1. Describe what you want done: `intake.create`.
-2. Answer the questions and provide the bill set, seeing exactly what is still missing: `intake.answer`,
-   `intake.uploadBillSet`, `intake.get` (live completeness report).
-3. See exactly what you will receive and on what assumptions; review price, scope, assumptions and timing:
-   `intake.get` → `quotes.get`.
-4. Purchase: `quotes.accept`. Payment stays operator-recorded until a provider is integrated.
-5. Track fulfillment: `orders.get`, `orders.clock`, `delivery.view`.
-6. Inspect and download results: `delivery.view`, `delivery.download`.
-7. Accept, or request a correction: `delivery.accept`, `delivery.requestCorrection`.
+**Verified in a real browser** (Chromium through Playwright, against the production build served by get-it's own
+FeltKit server, with FeltKit's cookie sessions and CSRF): `tests/browser.test.ts` (2 tests),
+`tests/browser-boundaries.test.ts` (8) and `tests/browser-tasks.test.ts` (3). Any uncaught page error fails a test.
+- **Task-first:** the landing page asks "What do you need done?" with illustrative examples and no category. An
+  arbitrary task is submitted, kept exactly as written through refresh and navigation, and listed with no quote. It is
+  given a deadline, a budget, a requirement, a file and a link, then scoped by a person to "more information needed"
+  (questions grouped by purpose), "under review", and "not something we can do right now". No quote or purchase button
+  ever appears.
+- **A task needing an outside professional:** says nobody has been arranged, on a phone-sized screen.
+- **Bill review:**
+  - the task is offered the service and the customer accepts it;
+  - intake, then the proposed service in four parts, then a live quote, then acceptance;
+  - payment recorded by an operator, then fulfillment, review, approval and publication;
+  - view and download, byte for byte against the packet, then acceptance of the exact digest;
+  - separately, a correction, re-delivery and acceptance of the corrected digest.
+- **Boundaries:**
+  - anonymous visitors;
+  - a member joining by invitation, who cannot accept;
+  - an expired session refused;
+  - another organization's tasks and requests not found, with forged writes refused, and a write without the CSRF
+    token refused;
+  - sign-out and sign-in losing nothing;
+  - the browser never receiving operator identities or payment references;
+  - a digest tampered in flight refused;
+  - double submissions creating one record;
+  - empty, loading, error and incomplete states;
+  - phone layouts with no horizontal scrolling.
 
-The UI should be verified in a browser against the running server (cookie sessions, CSRF), with the HTTP refusals
-re-asserted through it.
+**Next step.** Two directions, both outside this slice:
+1. **An operator interface** for scoping tasks (today: `tasks.assess` over the API).
+2. **A second fulfillment service** with its own frozen contract, so more task types can become purchasable.
+
+Before any real money flows, partial-acceptance settlement must be defined (§21).

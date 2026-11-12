@@ -14,7 +14,10 @@
     "contract:digest": "tsx scripts/contract-digest.ts",
     "test:only": "feltkit test",
     "sabotage": "node scripts/sabotage.mjs",
-    "test:http": "feltkit test tests/http-transaction.test.ts"
+    "test:http": "feltkit test tests/http-transaction.test.ts",
+    "test:browser": "feltkit test tests/browser.test.ts tests/browser-boundaries.test.ts tests/browser-tasks.test.ts",
+    "dev": "feltkit dev",
+    "build": "feltkit build"
   },
   "dependencies": {
     "@feltdb/feltkit": "0.3.27",

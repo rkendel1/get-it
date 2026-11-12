@@ -4,9 +4,10 @@
  */
 import { useState, type ReactNode } from "react";
 import { AcceptInvitation, AuthNotices, CreateTenant, SignIn, useAuth, useAuthRedirect, useTenant } from "@feltdb/feltkit/react";
-import { contract } from "./contract";
+import { Availability, EXAMPLES } from "./copy";
 import { Home } from "./Home";
 import { RequestPage } from "./RequestPage";
+import { TaskPage } from "./TaskPage";
 import { Loading, go, useRoute } from "./lib";
 
 export function App() {
@@ -40,6 +41,7 @@ export function App() {
 
 function Routes({ draft, clearDraft }: { draft: string; clearDraft(): void }) {
   const [section, id] = useRoute();
+  if (section === "tasks" && id) return <TaskPage requestId={id} />;
   if (section === "requests" && id) return <RequestPage sessionId={id} />;
   return <Home draft={draft} clearDraft={clearDraft} />;
 }
@@ -70,34 +72,30 @@ function Frame({ children, header }: { children: ReactNode; header?: ReactNode }
         </header>
       )}
       <main>{children}</main>
-      <footer className="footer">
-        {contract.title} · contract {contract.id}@{contract.version}
-      </footer>
+      <footer className="footer">get-it · say what you need done</footer>
     </div>
   );
 }
 
-/** For visitors: what the service is, the question it starts from, and FeltKit's sign-in. */
+/** For visitors: the question, examples of the kind of things people ask, and FeltKit's sign-in. */
 function Landing({ draft, setDraft }: { draft: string; setDraft(v: string): void }) {
   return (
     <Frame>
       <div className="landing">
         <section className="hero">
           <h1>What do you need done?</h1>
+          <p className="lede">Describe it in your own words. You don't need to pick a category: we work through the details with you, tell you what we need, and give you a price before anything starts.</p>
           <label className="sr-only" htmlFor="landing-request">Describe what you need done</label>
-          <textarea id="landing-request" rows={4} value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="For example: review the supplier bills waiting for approval before Friday's payment run." />
-          <p className="lede">
-            Today we deliver one outcome: <strong>{contract.title.toLowerCase()}</strong>. {contract.outcome}
-          </p>
-          <ul className="promises">
-            <li>You provide your bills, vendors and accounts. We tell you exactly what is missing.</li>
-            <li>You see the price, scope, assumptions and timing before you commit.</li>
-            <li>A person approves every package. Every result cites the input it came from.</li>
-            <li>We never change your books: no posting, paying, voiding or sending.</li>
+          <textarea id="landing-request" rows={4} value={draft} onChange={(e) => setDraft(e.target.value)} placeholder="For example: research our five main competitors and summarize their pricing." />
+          <p className="hint">People ask us things like:</p>
+          <ul className="examples" aria-label="Examples">
+            {EXAMPLES.map((e) => <li key={e}>“{e}”</li>)}
           </ul>
+          <p className="hint">These are examples of requests, not a list of services.</p>
+          <Availability />
         </section>
         <section className="signin" aria-label="Sign in">
-          <p className="hint">{draft.trim() ? "Create an account or sign in to continue with your request." : "Create an account or sign in to start."}</p>
+          <p className="hint">{draft.trim() ? "Create an account or sign in to send your request." : "Create an account or sign in to start."}</p>
           <SignIn brand={{ name: "get-it" }} initialMode="sign-up" />
         </section>
       </div>

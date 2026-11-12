@@ -12,6 +12,7 @@ import type * as payments_module from "../payments.js";
 import type * as quotes_module from "../quotes.js";
 import type * as review_module from "../review.js";
 import type * as runs_module from "../runs.js";
+import type * as tasks_module from "../tasks.js";
 
 /** Typed references to every query and mutation. Type-only imports: no backend code reaches the browser. */
-export const api = createApi<{ "accounting": typeof accounting_module; "app": typeof app_module; "delivery": typeof delivery_module; "imports": typeof imports_module; "intake": typeof intake_module; "integrity": typeof integrity_module; "orders": typeof orders_module; "payments": typeof payments_module; "quotes": typeof quotes_module; "review": typeof review_module; "runs": typeof runs_module }>();
+export const api = createApi<{ "accounting": typeof accounting_module; "app": typeof app_module; "delivery": typeof delivery_module; "imports": typeof imports_module; "intake": typeof intake_module; "integrity": typeof integrity_module; "orders": typeof orders_module; "payments": typeof payments_module; "quotes": typeof quotes_module; "review": typeof review_module; "runs": typeof runs_module; "tasks": typeof tasks_module }>();

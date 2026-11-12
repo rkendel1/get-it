@@ -23,11 +23,27 @@ async function ownerWithOrg(app: BrowserApp, page: Page, name: string, email: st
   return { owner, tenantId };
 }
 
-async function startRequest(page: Page, text: string) {
+/** Send a task from the home page; returns the task's id (from the URL). */
+async function sendTask(page: Page, text: string) {
   await page.getByLabel("Describe what you need done").fill(text);
-  await page.getByRole("button", { name: "Start my request" }).click();
+  await page.getByRole("button", { name: "Send my request" }).click();
+  await page.getByTestId("original-request").waitFor();
+  return page.url().split("#/tasks/")[1]!;
+}
+
+/** The bill-review intake a task continues in (storage read only to find its id). */
+async function sessionOf(app: BrowserApp, requestId: string) {
+  const choice = (await stored(app.http, "taskServiceChoices")).find((c) => c.requestId === requestId && c.choice === "accepted");
+  assert.ok(choice?.sessionId, "the task continues in an intake");
+  return choice.sessionId as string;
+}
+
+/** Send a bill-review task and continue with the offered service, as the customer does. */
+async function startRequest(app: BrowserApp, page: Page, text: string) {
+  const requestId = await sendTask(page, text);
+  await page.getByRole("button", { name: "Yes, continue with this service" }).click();
   await page.getByTestId("request-status").waitFor();
-  return page.url().split("#/requests/")[1]!;
+  return { requestId, sessionId: await sessionOf(app, requestId) };
 }
 
 async function answerAll(page: Page, skip: string[] = []) {
@@ -65,16 +81,16 @@ test("anonymous visitors see the service and FeltKit's sign-in, and no tenant da
   withBrowserApp(async (app) => {
     const { page: owner } = await app.person();
     await ownerWithOrg(app, owner, "Ada", "ada@acme.test", "Acme");
-    const sessionId = await startRequest(owner, "Review our bills.");
+    const { requestId } = await startRequest(app, owner, "Review our bills.");
 
     const { page, responses } = await app.person();
-    await page.goto(`${app.url}/#/requests/${sessionId}`);
+    await page.goto(`${app.url}/#/tasks/${requestId}`);
     await page.getByRole("heading", { name: "What do you need done?" }).waitFor();
     await page.getByRole("heading", { name: "Create your account" }).waitFor();
     assert.ok(!(await page.locator("body").innerText()).includes("Review our bills."));
     assert.ok(!(await apiBodies(responses)).includes("Review our bills."));
     // Calling a function without a session is refused by the server.
-    const r = await page.evaluate(async () => (await fetch("/api/query/intake:list", { method: "POST", headers: { "Content-Type": "application/json" }, body: '{"args":{}}' })).status);
+    const r = await page.evaluate(async () => (await fetch("/api/query/tasks:list", { method: "POST", headers: { "Content-Type": "application/json" }, body: '{"args":{}}' })).status);
     assert.ok(r === 401 || r === 403, `status ${r}`);
   }));
 
@@ -84,7 +100,7 @@ test("a member joins by invitation in the browser, provides information, and can
     const { owner } = await ownerWithOrg(app, ownerPage, "Ada", "ada@acme.test", "Acme");
     const otto = await signUp(app.http, "otto@get-it.test", "Otto");
     await join(owner, otto, "operator");
-    const sessionId = await startRequest(ownerPage, "Review our bills.");
+    const { sessionId } = await startRequest(app, ownerPage, "Review our bills.");
 
     // The owner invites Amy; Amy creates her account, verifies, and accepts in the browser.
     const invite = await app.http.request("POST", "/api/tenants/current/invitations", { email: "amy@acme.test", role: "member" }, owner.token);
@@ -121,14 +137,14 @@ test("an expired session returns the visitor to sign-in, and the server refuses 
   withBrowserApp(async (app) => {
     const { page } = await app.person();
     await ownerWithOrg(app, page, "Ada", "ada@acme.test", "Acme");
-    const sessionId = await startRequest(page, "Review our bills.");
+    const { requestId } = await startRequest(app, page, "Review our bills.");
     // Expire every session of the account, as time would.
     const sessions = app.t.runtime.instance.handle("test.expire").collection<Record<string, any>>("_feltkit_sessions");
     for (const s of await sessions.find({})) await sessions.update(s.id, { expiresAt: new Date(Date.now() - 1000).toISOString() });
     await page.reload();
     await page.getByRole("heading", { name: "Create your account" }).or(page.getByRole("heading", { name: "Welcome back." })).first().waitFor();
     assert.ok(!(await page.locator("body").innerText()).includes("Review our bills."));
-    const r = await page.evaluate(async (id) => (await fetch("/api/query/intake:get", { method: "POST", headers: { "Content-Type": "application/json", "X-FeltKit-Session": "cookie" }, body: JSON.stringify({ args: { sessionId: id } }) })).status, sessionId);
+    const r = await page.evaluate(async (id) => (await fetch("/api/query/tasks:get", { method: "POST", headers: { "Content-Type": "application/json", "X-FeltKit-Session": "cookie" }, body: JSON.stringify({ args: { requestId: id } }) })).status, requestId);
     assert.ok(r === 401 || r === 403, `status ${r}`);
     await app.shot(page, "22-session-expired");
   }));
@@ -137,11 +153,11 @@ test("tenant isolation in the browser: another organization's request is not fou
   withBrowserApp(async (app) => {
     const { page: acme } = await app.person();
     await ownerWithOrg(app, acme, "Ada", "ada@acme.test", "Acme");
-    const sessionId = await startRequest(acme, "Acme's confidential bills.");
+    const { requestId } = await startRequest(app, acme, "Acme's confidential bills.");
 
     const { page, responses } = await app.person();
     await ownerWithOrg(app, page, "Gus", "gus@globex.test", "Globex");
-    await page.goto(`${app.url}/#/requests/${sessionId}`);
+    await page.goto(`${app.url}/#/tasks/${requestId}`);
     await page.getByRole("heading", { name: "Request not found" }).waitFor();
     await page.goto(`${app.url}/#/`);
     await page.getByText("No requests yet.").waitFor();
@@ -151,7 +167,7 @@ test("tenant isolation in the browser: another organization's request is not fou
     // A signed-in person with no organization is asked to create one; Acme's request is not reachable.
     const { page: nora } = await app.person();
     await signUpInBrowser(app, nora, "Nora", "nora@elsewhere.test");
-    await nora.goto(`${app.url}/#/requests/${sessionId}`);
+    await nora.goto(`${app.url}/#/tasks/${requestId}`);
     await nora.getByRole("heading", { name: "Name your organization" }).waitFor();
     assert.ok(!(await nora.locator("body").innerText()).includes("confidential"));
   }));
@@ -164,7 +180,7 @@ test("customer-safe: across the whole journey the browser receives no operator i
     const olga = await signUp(app.http, "olga@get-it.test", "Olga");
     await join(owner, otto, "operator");
     await join(owner, olga, "operator");
-    const sessionId = await startRequest(page, "Review our bills.");
+    const { sessionId } = await startRequest(app, page, "Review our bills.");
     await answerAll(page);
     await page.getByRole("button", { name: "Finish and request a quote" }).click();
     const quote = await otto.mutation("quotes:create", { sessionId });
@@ -196,7 +212,7 @@ test("tampered digests sent from the browser are refused by the server and shown
     const { owner } = await ownerWithOrg(app, page, "Ada", "ada@acme.test", "Acme");
     const otto = await signUp(app.http, "otto@get-it.test", "Otto");
     await join(owner, otto, "operator");
-    const sessionId = await startRequest(page, "Review our bills.");
+    const { sessionId } = await startRequest(app, page, "Review our bills.");
     await answerAll(page);
     await page.getByRole("button", { name: "Finish and request a quote" }).click();
     await otto.mutation("quotes:create", { sessionId });
@@ -221,12 +237,16 @@ test("refresh and navigation keep the request, from the server; duplicate submis
     const otto = await signUp(app.http, "otto@get-it.test", "Otto");
     await join(owner, otto, "operator");
 
-    // A double click on "Start my request" starts one request.
+    // A double click on "Send my request" sends one request; a double click on "continue" starts one intake.
     await page.getByLabel("Describe what you need done").fill("Review our bills.");
-    await page.getByRole("button", { name: "Start my request" }).dblclick();
+    await page.getByRole("button", { name: "Send my request" }).dblclick();
+    await page.getByTestId("original-request").waitFor();
+    const requestId = page.url().split("#/tasks/")[1]!;
+    assert.equal((await stored(app.http, "taskRequests")).length, 1);
+    await page.getByRole("button", { name: "Yes, continue with this service" }).dblclick();
     await page.getByTestId("request-status").waitFor();
-    const sessionId = page.url().split("#/requests/")[1]!;
     assert.equal((await stored(app.http, "intakeSessions")).length, 1);
+    const sessionId = await sessionOf(app, requestId);
 
     await page.getByLabel("Your home currency").fill("EUR");
     await page.locator('[data-input="homeCurrency"]').getByRole("button", { name: "Save" }).click();
@@ -237,7 +257,7 @@ test("refresh and navigation keep the request, from the server; duplicate submis
     await page.getByRole("link", { name: "Your requests" }).click();
     await page.getByRole("link", { name: /Review our bills\./ }).click();
     await page.getByTestId("value-homeCurrency").filter({ hasText: "EUR" }).waitFor();
-    assert.equal(page.url().split("#/requests/")[1], sessionId);
+    assert.equal(page.url().split("#/tasks/")[1], requestId);
 
     await page.locator('[data-input="homeCurrency"]').getByRole("button", { name: "Change" }).click();
     await page.getByLabel("Your home currency").fill("USD");
@@ -272,17 +292,18 @@ test("empty, loading, error and incomplete states are shown, and the layout fits
     // Loading: hold the intake read so the loading state is visible.
     let release!: () => void;
     const held = new Promise<void>((r) => (release = r));
-    await page.route("**/api/query/intake*get", async (route) => {
+    await page.route("**/api/query/tasks*get", async (route) => {
       await held;
       await route.continue();
     });
     await page.getByLabel("Describe what you need done").fill("Review our bills.");
-    await page.getByRole("button", { name: "Start my request" }).click();
+    await page.getByRole("button", { name: "Send my request" }).click();
     await page.getByRole("status").filter({ hasText: "Loading your request" }).waitFor();
     await app.shot(page, "32-mobile-loading");
     // Once released the interception passes every request straight through. (Removing it while requests
     // are held lets Playwright continue them itself, racing this handler.)
     release();
+    await page.getByRole("button", { name: "Yes, continue with this service" }).click();
     await page.getByTestId("request-status").waitFor();
 
     // Incomplete: finishing early is refused by the server, which names what is missing.

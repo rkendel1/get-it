@@ -25,8 +25,10 @@ import { digest } from "../src/canonical.js";
 import { buildPackage } from "../src/deliverables.js";
 import { review, type ReviewOutput } from "../src/review.js";
 import { snapshotDigest, type ReviewScope } from "../src/snapshot.js";
+import { taskAssessments, taskDetails, taskRequests, taskResources, taskServiceChoices } from "./app.js";
 import { acceptances, app, approvals, blockEvents, corrections, decisions, deliveries, fulfillmentAcceptances, inputBindings, intakeAnswers, intakeCompleteness, intakeSessions, orders, outcomeRequests, packets, payments, quoteAcceptances, quotes, runs, snapshots, sourceRecords } from "./app.js";
 import { CONTRACT, loadRecords, loadSnapshot, requireTenant } from "./_guards.js";
+import { PATHS } from "./_paths.js";
 import { quoteTerms } from "./quotes.js";
 
 export const check = app.query({
@@ -36,6 +38,11 @@ export const check = app.query({
     const tenantId = requireTenant(ctx);
     const problems: string[] = [];
     const all = {
+      taskRequests: await ctx.db.find(taskRequests, {}),
+      taskDetails: await ctx.db.find(taskDetails, {}),
+      taskResources: await ctx.db.find(taskResources, {}),
+      taskAssessments: await ctx.db.find(taskAssessments, {}),
+      taskServiceChoices: await ctx.db.find(taskServiceChoices, {}),
       outcomeRequests: await ctx.db.find(outcomeRequests, {}),
       intakeSessions: await ctx.db.find(intakeSessions, {}),
       intakeAnswers: await ctx.db.find(intakeAnswers, {}),
@@ -59,6 +66,19 @@ export const check = app.query({
     };
     for (const [name, list] of Object.entries(all)) {
       for (const r of list as Array<{ id: string; tenantId?: string }>) if (r.tenantId !== tenantId) problems.push(`${name} ${r.id}: tenantId ${String(r.tenantId)} ≠ ${tenantId}`);
+    }
+
+    // Task requests: one accepted service per task, linked to an intake that exists; real services only; answers to asked questions.
+    const sessionIds = new Set(all.intakeSessions.map((x) => x.id));
+    const taskIds = new Set(all.taskRequests.map((x) => x.id));
+    for (const c of all.taskServiceChoices) {
+      if (!taskIds.has(c.requestId)) problems.push(`service choice ${c.id}: task missing`);
+      if (c.choice === "accepted" && (!c.sessionId || !sessionIds.has(c.sessionId))) problems.push(`service choice ${c.id}: accepted without an intake`);
+    }
+    for (const id of taskIds) if (all.taskServiceChoices.filter((c) => c.requestId === id && c.choice === "accepted").length > 1) problems.push(`task ${id}: more than one accepted service`);
+    for (const a of all.taskAssessments) if (a.service && !PATHS.some((p) => p.service === a.service)) problems.push(`assessment ${a.id}: ${a.service} is not an active service`);
+    for (const d of all.taskDetails.filter((x) => x.kind === "answer")) {
+      if (!all.taskAssessments.some((a) => a.requestId === d.requestId && a.questions.some((q) => q.id === d.questionId))) problems.push(`detail ${d.id}: answers a question never asked`);
     }
 
     for (const r of all.sourceRecords) if (digest(r.record) !== r.digest) problems.push(`input ${r.kind} ${r.key}: content does not match its digest`);

@@ -16,7 +16,8 @@ const useIntake = (sessionId: string) => useLive(api.intake.get, { sessionId });
 /** The completeness report: live while the intake is open, as recorded once it is complete. */
 const reportOf = (data: Intake) => data.completeness.report as CompletenessReport;
 
-export function RequestPage({ sessionId }: { sessionId: string }) {
+/** The bill-review service's flow for one intake. `embedded`: shown inside the task it continues. */
+export function RequestPage({ sessionId, embedded = false }: { sessionId: string; embedded?: boolean }) {
   const intake = useIntake(sessionId);
   const orderId = intake.data?.quote?.orderId ?? null;
   const order = useLive(api.orders.get, orderId ? { id: orderId } : "skip");
@@ -32,10 +33,10 @@ export function RequestPage({ sessionId }: { sessionId: string }) {
 
   return (
     <div className="stack">
-      <p className="crumbs"><a href="#/">Your requests</a></p>
+      {embedded ? null : <p className="crumbs"><a href="#/">Your requests</a></p>}
       <Card>
-        <p className="eyebrow">Your request</p>
-        <h1 className="request-title">{data.request}</h1>
+        <p className="eyebrow">{embedded ? `Service: ${contract.title}` : "Your request"}</p>
+        {embedded ? null : <h1 className="request-title">{data.request}</h1>}
         <p className="status-line">
           Status: <strong data-testid="request-status">{label}</strong>
         </p>
