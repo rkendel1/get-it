@@ -148,6 +148,7 @@ export const check = app.query({
       const d = deliveryById.get(x.deliveryId);
       const bills = new Set(((d && runById.get(d.runId)?.output) as ReviewOutput | undefined)?.results.map((r) => r.billKey) ?? []);
       if (!d) problems.push(`acceptance ${x.id}: delivery missing`);
+      else if (x.packetDigest !== d.packetDigest) problems.push(`acceptance ${x.id}: names ${x.packetDigest}, the delivery is ${d.packetDigest}`);
       if (x.acceptedBills.some((k) => !bills.has(k)) || x.acceptedBills.length !== x.billsCounted) problems.push(`acceptance ${x.id}: accepted bills are not the delivery's`);
       const expected = x.scope === "full" ? charge({ kind: "accepted", billsCounted: x.billsCounted }, CONTRACT.pricing) : charge({ kind: "partial", customerAcceptedPortion: true, billsAccepted: x.billsCounted }, CONTRACT.pricing);
       if (expected.minor !== x.chargeMinor) problems.push(`acceptance ${x.id}: charge ${x.chargeMinor} ≠ ${expected.minor} by the contract`);
@@ -155,6 +156,7 @@ export const check = app.query({
     for (const c of all.corrections) {
       const d = deliveryById.get(c.deliveryId);
       if (!d) problems.push(`correction ${c.id}: delivery missing`);
+      else if (c.packetDigest !== d.packetDigest) problems.push(`correction ${c.id}: names ${c.packetDigest}, the delivery is ${d.packetDigest}`);
       else if (c.requestedAt > d.correctionWindowEndsAt) problems.push(`correction ${c.id}: requested after the window`);
     }
 

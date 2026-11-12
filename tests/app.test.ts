@@ -24,7 +24,7 @@ test("tenant isolation: another organization's records do not exist for the call
     assert.equal((await acme.operator.query(api.orders.list, {})).length, 1);
     assert.deepEqual(await globex.operator.query(api.orders.list, {}), []);
     assert.equal(await globex.operator.query(api.orders.get, { id: a.orderId }), null);
-    assert.equal(await globex.owner.query(api.runs.get, { id: a.runId }), null);
+    assert.equal(await globex.operator.query(api.runs.get, { id: a.runId }), null);
     assert.equal(await globex.owner.query(api.delivery.get, { id: a.deliveryId }), null);
     assert.equal(await globex.owner.query(api.delivery.files, { deliveryId: a.deliveryId }), null);
     assert.deepEqual(await globex.operator.query(api.imports.list, { orderId: a.orderId }), []);
@@ -40,8 +40,8 @@ test("tenant isolation: another organization's records do not exist for the call
       assert.ok(rows.length > 0, name);
       assert.ok(rows.every((r) => r.tenantId === acme.id), `${name}: every record has tenantId = Acme`);
     }
-    assert.deepEqual((await globex.owner.query(api.integrity.check, {})).problems, []);
-    assert.deepEqual((await acme.owner.query(api.integrity.check, {})).problems, []);
+    assert.deepEqual((await globex.operator.query(api.integrity.check, {})).problems, []);
+    assert.deepEqual((await acme.operator.query(api.integrity.check, {})).problems, []);
   }));
 
 test("idempotent re-import: the same bill set is one snapshot; a changed bill adds only itself", () =>
@@ -98,7 +98,7 @@ test("approvals are refused for agents, customers without authority, expired req
     assert.notEqual(again.packetId, packetId);
     assert.equal((await org.reviewer.mutation(api.review.approve, { packetId: again.packetId, digest })).status, "approved");
     assert.equal((await org.reviewer.mutation(api.review.approve, { packetId: again.packetId, digest })).status, "existing");
-    const [approval] = await org.owner.query(api.review.listApprovals, { packetId: again.packetId });
+    const [approval] = await org.operator.query(api.review.listApprovals, { packetId: again.packetId });
     assert.deepEqual([approval!.approvedBy, approval!.requestedBy, approval!.approverType], ["olga", "otto", "user"]);
   }));
 
@@ -110,7 +110,7 @@ test("customer decisions: suspected duplicates only, by the customer's people, o
     await rejectsWith(org.member.mutation(api.review.decide, { runId: r.runId, exceptionId: "B3:total_mismatch", decision: "acknowledged" }), "FAILED_PRECONDITION");
     await org.member.mutation(api.review.decide, { runId: r.runId, exceptionId: "B6:duplicate_in_set", decision: "confirmed", note: "Entered twice." });
     await rejectsWith(org.owner.mutation(api.review.decide, { runId: r.runId, exceptionId: "B6:duplicate_in_set", decision: "rejected" }), "CONFLICT");
-    assert.deepEqual((await org.owner.query(api.integrity.check, {})).problems, []);
+    assert.deepEqual((await org.operator.query(api.integrity.check, {})).problems, []);
   }));
 
 test("every accounting mutation is refused, for every role, and the app has no other functions", () =>
@@ -147,7 +147,7 @@ test("integrity: recomputation catches edited inputs, outputs and approvals", ()
   withApp(async (t) => {
     const org = await newOrg(t, "Acme", { owner: "ada", member: "amy" });
     const d = await delivered(org);
-    const clean = await org.owner.query(api.integrity.check, {});
+    const clean = await org.operator.query(api.integrity.check, {});
     assert.deepEqual(clean.problems, []);
     assert.equal(clean.counts.deliveries, 1);
 
@@ -159,7 +159,7 @@ test("integrity: recomputation catches edited inputs, outputs and approvals", ()
     const [approval] = await raw(t, "approvals").find({});
     await raw(t, "approvals").update(approval!.id, { approvedBy: "otto" });
 
-    const problems = (await org.owner.query(api.integrity.check, {})).problems.join("\n");
+    const problems = (await org.operator.query(api.integrity.check, {})).problems.join("\n");
     assert.match(problems, /input bill B1: content does not match its digest/);
     assert.match(problems, new RegExp(`run ${run!.id}: packet digest does not recompute`));
     assert.match(problems, new RegExp(`run ${run!.id}: output does not recompute from its snapshot`));
@@ -183,7 +183,7 @@ test("acceptance: in full by the customer owner, partial by named bills, charged
     await rejectsWith(org.owner.mutation(api.delivery.accept, { deliveryId: d.deliveryId, packetDigest: d.packetDigest, scope: "full" }), "CONFLICT", "ALREADY_ACCEPTED");
     await rejectsWith(org.owner.mutation(api.delivery.requestCorrection, { deliveryId: d.deliveryId, packetDigest: d.packetDigest, reason: "late change" }), "CONFLICT", "ALREADY_ACCEPTED");
     assert.equal((await org.owner.query(api.orders.get, { id: d.orderId }))!.status, "delivery_accepted");
-    assert.deepEqual((await org.owner.query(api.integrity.check, {})).problems, []);
+    assert.deepEqual((await org.operator.query(api.integrity.check, {})).problems, []);
 
     const other = await newOrg(t, "Initech", { owner: "ian", member: "ivy" });
     const full = await delivered(other);
@@ -204,7 +204,7 @@ test("correction: within the window and before acceptance; the corrected package
     const corrected = { ...set, bills: set.bills.map((b) => (b.id === "B3" ? { ...b, totalMinor: 7500 } : b)) };
     const imported = await org.operator.mutation(api.imports.record, { orderId: d.orderId, billSet: corrected });
     const run2 = await org.operator.mutation(api.runs.reviewSnapshot, { snapshotId: imported.snapshotId });
-    const output = (await org.owner.query(api.runs.get, { id: run2.runId }))!.output as { results: Array<{ billKey: string; status: string }> };
+    const output = (await org.operator.query(api.runs.get, { id: run2.runId }))!.output as { results: Array<{ billKey: string; status: string }> };
     assert.equal(output.results.find((r) => r.billKey === "B3")!.status, "ready_for_payable_approval");
     const p2 = await org.operator.mutation(api.review.request, { runId: run2.runId });
     assert.notEqual(p2.digest, d.packetDigest);
@@ -252,7 +252,7 @@ test("business-day clock: it starts at fulfillment acceptance, blocking pauses i
     assert.deepEqual((delivery.report as { on_time: string[] }).on_time.length, 1);
     assert.ok(delivery.correctionWindowEndsAt > delivery.publishedAt);
     // Moving the clock is itself drift, and the integrity check reports exactly that.
-    const problems = (await org.owner.query(api.integrity.check, {})).problems;
+    const problems = (await org.operator.query(api.integrity.check, {})).problems;
     assert.equal(problems.length, 1);
     assert.match(problems[0]!, new RegExp(`order ${orderId}: clock started at \\d+, fulfillment was accepted at ${acceptance!.acceptedAt}`));
   }));

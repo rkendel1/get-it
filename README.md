@@ -38,6 +38,8 @@ The package contains:
 - a summary export; and
 - an approval packet binding the sha256 of every file.
 
+Production needs `MAILPORT_URL` for account e-mail. People verify their address before joining an organization.
+
 **Status.** Implemented as stored FeltKit steps, with no workflow runtime:
 - **Intake:** contract-driven answers, bill-set upload, a completeness report and assumptions.
 - **Quoting:** an immutable quote priced by the contract.
@@ -50,15 +52,21 @@ The package contains:
 - Customer-blocked time.
 - An integrity check over every fact.
 
-No accounting write is possible. **No HTTP or UI surface has been exercised:** every test calls FeltKit functions
-in-process. That is the next step. See [`docs/spec.md`](docs/spec.md), Appendix C.
+No accounting write is possible. **The whole customer transaction is proven over HTTP** against the running FeltKit
+server, with real accounts, verified addresses, organizations, invitations and sessions (`npm run test:http`). **No
+customer UI exists yet**: that is the next step. See [`docs/spec.md`](docs/spec.md), Appendix C.
+
+**Open business issue:** a partial delivery acceptance charges less than the paid quote, and no refund, credit or
+adjustment exists. Define it before real money flows.
 
 ```bash
 npm ci
-npm test   # codegen, typecheck, then the tests on a real FeltKit runtime (fresh FeltDB per test)
+npm test            # codegen, typecheck, then every test (in-process and HTTP), fresh FeltDB per test
+npm run test:http   # only the HTTP transaction tests, against get-it's running FeltKit server
+npm run sabotage    # break each critical guard in turn; every one must fail the test that reaches it
 ```
 
-- [`docs/spec.md`](docs/spec.md) is the building specification (revision 5).
+- [`docs/spec.md`](docs/spec.md) is the building specification (revision 6).
 - `src/` holds the pure domain, with no FeltKit dependency: bills, snapshot, intake, review, deliverables,
   acceptance, pricing, calendar, money, contract and accounting.
 - `feltkit/` holds the application: tenancy, intake, quotes, payments, orders, imports, runs, review, delivery,

@@ -133,13 +133,13 @@ test("quotes: require a complete intake, equal runPriceMinor, record their terms
     // Immutable: a second create returns the same quote; no function changes it; drift is detected.
     const again = await org.operator.mutation(api.quotes.create, { sessionId });
     assert.deepEqual([again.quoteId, again.quoteDigest, again.status], [q.quoteId, q.quoteDigest, "existing"]);
-    assert.deepEqual((await org.owner.query(api.integrity.check, {})).problems, []);
+    assert.deepEqual((await org.operator.query(api.integrity.check, {})).problems, []);
     await raw(t, "quotes").update(q.quoteId, { priceMinor: 1 });
-    const problems = (await org.owner.query(api.integrity.check, {})).problems.join("\n");
+    const problems = (await org.operator.query(api.integrity.check, {})).problems.join("\n");
     assert.match(problems, new RegExp(`quote ${q.quoteId}: content does not match its digest`));
     assert.match(problems, new RegExp(`quote ${q.quoteId}: price 1 is not runPriceMinor\\(130\\) = 31000`));
     await raw(t, "quotes").update(q.quoteId, { priceMinor: 31_000, assumptions: [] });
-    assert.deepEqual((await org.owner.query(api.integrity.check, {})).problems, [`quote ${q.quoteId}: content does not match its digest`], "dropping the assumptions is drift too");
+    assert.deepEqual((await org.operator.query(api.integrity.check, {})).problems, [`quote ${q.quoteId}: content does not match its digest`], "dropping the assumptions is drift too");
   }));
 
 test("quote acceptance: owner-only, person-only, bound to the quote digest, idempotent, one order, no fulfillment", () =>
@@ -241,5 +241,5 @@ test("fulfillment acceptance: only after payment, by an operator person, and onl
     assert.equal((await org.owner.query(api.orders.clock, { id: orderId }))!.paused, true);
     await org.operator.mutation(api.orders.unblock, { orderId, reason: "received" });
     assert.equal((await org.owner.query(api.orders.clock, { id: orderId }))!.paused, false);
-    assert.deepEqual((await org.owner.query(api.integrity.check, {})).problems, []);
+    assert.deepEqual((await org.operator.query(api.integrity.check, {})).problems, []);
   }));

@@ -25,7 +25,15 @@
  */
 import { feltkit, s } from "@feltdb/feltkit";
 
-const READ = ["intake.read", "quotes.read", "payments.read", "orders.read", "imports.read", "runs.read", "review.read", "decisions.read", "delivery.read", "integrity.read"];
+/** What everyone in an organization reads: their intake, quote, order and delivery (customer-safe views). */
+const READ = ["intake.read", "quotes.read", "orders.read", "decisions.read", "delivery.read"];
+
+/**
+ * Internal records: snapshots, runs (with their full output and author), review packets and
+ * approvals, payments, and the integrity report. They name operators and approvers, so only
+ * operators read them; customers see the delivery through delivery.view and delivery.download.
+ */
+const INTERNAL_READ = ["payments.read", "imports.read", "runs.read", "review.read", "integrity.read"];
 
 /** Anyone in an organization may ask for an accounting action. It is always refused (accounting.ts). */
 const ASK = ["accounting.request"];
@@ -37,7 +45,7 @@ const OWNER = [...READ, ...ASK, "intake.write", "quotes.accept", "decisions.reco
 const MEMBER = [...READ, ...ASK, "intake.write", "decisions.record"];
 
 /** get-it staff working in a customer's organization. They never accept a quote or a delivery for the customer. */
-const OPERATOR = [...READ, ...ASK, "intake.write", "quotes.write", "payments.record", "orders.accept", "orders.write", "imports.write", "runs.write", "review.request", "review.approve", "delivery.publish"];
+const OPERATOR = [...READ, ...INTERNAL_READ, ...ASK, "intake.write", "quotes.write", "payments.record", "orders.accept", "orders.write", "imports.write", "runs.write", "review.request", "review.approve", "delivery.publish"];
 
 export const ROLES = ["owner", "member", "operator"] as const;
 
@@ -51,7 +59,10 @@ export const app = feltkit({
     operator: OPERATOR,
   },
   auth: {
-    accounts: { roles: ["person"] },
+    // Account e-mail: joining an organization requires a verified address (FeltKit invitations), and
+    // verification is e-mailed. Development and tests use FeltKit's in-memory mail; production needs
+    // MAILPORT_URL (without it, FeltKit sends no account e-mail and nobody can verify or join).
+    accounts: { roles: ["person"], email: { from: "accounts@get-it.invalid" } },
     tenant: { name: "organization", roles: ROLES, create: "anyone" },
   },
 });
@@ -372,6 +383,8 @@ export const acceptances = app.collection(
   {
     ...TENANT,
     deliveryId: s.string(),
+    /** The delivered package digest the customer accepted. */
+    packetDigest: sha(),
     scope: s.enum(["full", "partial"] as const),
     acceptedBills: s.array(s.string()),
     billsCounted: s.integer({ minimum: 0 }),
@@ -389,6 +402,8 @@ export const corrections = app.collection(
   {
     ...TENANT,
     deliveryId: s.string(),
+    /** The delivered package digest the correction is about. */
+    packetDigest: sha(),
     reason: s.string({ minLength: 1, maxLength: 2000 }),
     requestedBy: s.string(),
     requestedAt: s.number(),

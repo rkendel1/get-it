@@ -12,7 +12,7 @@ import { BillSetError } from "../src/bills.js";
 import { digest } from "../src/canonical.js";
 import { completeness, inputSpecs, validateAnswer, type AnswerState } from "../src/intake.js";
 import { addressBillSet, type AddressedBillSet } from "../src/snapshot.js";
-import { app, audit, inputBindings, intakeAnswers, intakeCompleteness, intakeSessions, outcomeRequests } from "./app.js";
+import { app, audit, inputBindings, intakeAnswers, intakeCompleteness, intakeSessions, outcomeRequests, quoteAcceptances, quotes } from "./app.js";
 import { CONTRACT, loadRecords, requireTenant, storeRecords } from "./_guards.js";
 
 export const create = app.mutation({
@@ -143,7 +143,7 @@ export const complete = app.mutation({
   },
 });
 
-/** The intake as it stands: answers (latest per input), the bound bill set, and the live completeness report. */
+/** The intake as it stands: answers (latest per input), the bound bill set, the live completeness report, and its quote. */
 export const get = app.query({
   access: "intake.read",
   args: { sessionId: s.string() },
@@ -156,12 +156,16 @@ export const get = app.query({
     const answers = await answersOf(ctx, session.id);
     const binding = await latestBinding(ctx, session.id);
     const live = completeness(CONTRACT, answers, await addressedOf(ctx, binding));
+    // How the customer finds what they are offered: the quote for this intake, with the digest they accept.
+    const [quote] = done ? await ctx.db.find(quotes, { completenessId: done.id }) : [];
+    const [acceptance] = quote ? await ctx.db.find(quoteAcceptances, { quoteId: quote.id }) : [];
     return {
       session: { id: session.id, contract: session.contract, contractDigest: session.contractDigest, createdAt: session.createdAt },
       request: request?.text ?? null,
       answers: Object.fromEntries(answers),
       billSet: binding ? { digest: binding.digest, ...binding.counts } : null,
       completeness: done ? { status: "complete" as const, completenessId: done.id, report: done.report, reportDigest: done.reportDigest } : { status: "open" as const, missing: live.missing, report: live.report },
+      quote: quote ? { id: quote.id, digest: quote.digest, billCount: quote.billCount, priceMinor: quote.priceMinor, currency: quote.currency, validUntil: quote.validUntil, orderId: acceptance?.orderId ?? null } : null,
     };
   },
 });

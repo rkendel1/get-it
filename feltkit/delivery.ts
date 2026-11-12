@@ -135,6 +135,7 @@ export const accept = app.mutation({
     const id = await ctx.db.insert(acceptances, {
       tenantId,
       deliveryId: delivery.id,
+      packetDigest: delivery.packetDigest,
       scope: a.scope,
       acceptedBills: accepted,
       billsCounted: accepted.length,
@@ -157,7 +158,7 @@ export const requestCorrection = app.mutation({
     const person = requirePerson(ctx);
     const delivery = await openDelivery(ctx, a.deliveryId, a.packetDigest);
     if (Date.now() > delivery.correctionWindowEndsAt) fail("FAILED_PRECONDITION", "The correction window has closed.", { hint: "WINDOW_CLOSED" });
-    const id = await ctx.db.insert(corrections, { tenantId, deliveryId: delivery.id, reason: a.reason, requestedBy: person.id, requestedAt: Date.now() });
+    const id = await ctx.db.insert(corrections, { tenantId, deliveryId: delivery.id, packetDigest: delivery.packetDigest, reason: a.reason, requestedBy: person.id, requestedAt: Date.now() });
     await ctx.db.patch(orders, delivery.orderId, { status: "correcting" });
     await audit.record(ctx, { subject: "delivery", id: delivery.id, type: "delivery.correction_requested", data: { reason: a.reason } });
     return id;
@@ -173,6 +174,7 @@ export const get = app.query({
     const { publishedBy: _by, approvalId: _approval, ...delivery } = found; // no internal identities
     const [acceptance] = await ctx.db.find(acceptances, { deliveryId: delivery.id });
     const [correction] = await ctx.db.find(corrections, { deliveryId: delivery.id });
+    // The customer's own records; the people who made them are customers, and are shown.
     return { delivery, acceptance: acceptance ?? null, correction: correction ?? null };
   },
 });

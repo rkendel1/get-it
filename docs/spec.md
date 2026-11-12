@@ -2,11 +2,22 @@
 
 ## Implementation-Oriented Building Specification
 
-**Status:** Revision 5. The first service is `svc_bill_review_payable_prep@1.0.0`, which is **frozen** and
+**Status:** Revision 6. The first service is `svc_bill_review_payable_prep@1.0.0`, which is **frozen** and
 unchanged in this revision.
 **Date:** 2026-11-12
 **Audience:** Product, platform, fulfillment, security and operations
-**Supersedes:** Revisions 1–4
+**Supersedes:** Revisions 1–5
+
+### Changes from revision 5: the customer transaction is proven over HTTP
+
+| # | Change | Why (what the HTTP tests showed) |
+|---|---|---|
+| 1 | **The whole customer transaction runs over HTTP** against get-it's running FeltKit server (FeltKit's own `startServer`) with real password accounts, verified addresses, organizations created and joined through FeltKit's tenancy endpoints, and server-issued sessions. `tests/http-transaction.test.ts`. | 66 in-process tests proved that functions work, not that a customer can buy. |
+| 2 | **Account e-mail is declared** (`auth.accounts.email`). | Over HTTP nobody could verify an address, so nobody could accept an invitation and join an organization. In production it requires `MAILPORT_URL`. |
+| 3 | **`intake.get` returns the intake's quote** (id, digest, price, validity, and the order once accepted). | A customer had no way to discover the quote they are asked to accept. Extending an existing function, not a new one. |
+| 4 | **Internal records are operator reads.** `runs.get`, `imports.list`, `review.listPackets`, `review.listApprovals` and `integrity.check` need `runs.read`, `imports.read`, `review.read` or `integrity.read`, which only operators hold. | Customer roles could read run authors, snapshot importers, approvers and requesters. Customers see the delivery through `delivery.view` and `delivery.download`. |
+| 5 | **Acceptance and correction records store the delivered `packetDigest`**, and the integrity check verifies it. | The digest was checked at the call but not recorded, so the evidence could not show which package was accepted or corrected. |
+| 6 | **Sabotage checks are a committed script** (`npm run sabotage`): 15 guards, each broken in turn, each required to fail the test that reaches it. | Re-runnable evidence, not a one-off. |
 
 ### Changes from revision 4
 
@@ -74,8 +85,9 @@ The durable commercial contract is:
 - review, human approval and publication;
 - customer view, download, acceptance and correction.
 
-All of it is FeltKit functions tested in-process. **No customer UI and no HTTP surface has been built or exercised.**
-No payment provider is integrated, and no accounting write is possible.
+All of it is proven end to end **over HTTP** against the running FeltKit server, with real accounts and sessions
+(revision 6), as well as by in-process tests. **No customer UI exists yet.** No payment provider is integrated, and no
+accounting write is possible.
 
 **The first outcome.** The customer submits the supplier bills awaiting approval, with the vendor and account
 records they name, as a Ledger-compatible bill set. get-it:
@@ -476,6 +488,8 @@ is relied on.
 
 | Role | May |
 |---|---|
+| everyone in an organization | read their intake (including its quote), quote, order and clock, and the customer delivery view and downloads |
+| `operator` only | internal reads: snapshots, runs, review packets and approvals, payments, the integrity report |
 | `operator` (get-it staff) | intake; quote; record a payment (a person); accept for fulfillment (a person); import corrections; review; request review; approve another operator's request; publish; block or unblock. Never accept a quote or a delivery for the customer. |
 | `owner` (customer) | intake; accept a quote (a person); decide duplicates; accept a delivery; request a correction; read |
 | `member` (customer) | intake; decide duplicates; read |
@@ -612,7 +626,12 @@ All are automated in `tests/`:
 ## 21. Open decisions
 
 - Intake UX for uploading the bill set: JSON as specified, or a CSV mapping to the same format.
-- Whether a partial delivery acceptance refunds the difference from the paid quote, or credits it.
+- **Partial-acceptance settlement (must be decided before real money flows).** Today the customer pays the full
+  quote before fulfillment, while a partial acceptance records a smaller charge (`runPriceMinor` of the bills
+  accepted). Nothing reconciles the difference: no refund, credit or adjustment exists. Partial acceptance must not be
+  treated as full-price settlement. Define the adjustment, refund or credit lifecycle first.
+- **Operator provisioning.** Operators join a customer's organization only when the customer's owner invites them
+  (FeltKit invitations). A platform-level way to assign get-it staff to customer organizations does not exist yet.
 - Retention, deletion and export obligations for customers' financial data.
 - Which FeltDB authority hosts production. Embedded local is the verified path.
 
@@ -624,8 +643,9 @@ All are automated in `tests/`:
    clock and integrity~~ (done: Appendix C).
 4. ~~Add intake, quoting, operator-recorded payment, fulfillment acceptance and customer delivery access~~ (done:
    revision 5).
-5. **Next:** an HTTP and UI surface over these functions, verified end to end (Appendix C, "Next step").
-6. Then invoicing and refunds, operator queues, and a second outcome.
+5. ~~Prove the customer transaction over HTTP~~ (done: revision 6).
+6. **Next:** the customer UI, as a FeltKit client over the existing functions (Appendix C, "Next step").
+7. Then define partial-acceptance settlement, then payment-provider integration, invoicing and refunds.
 
 ---
 
@@ -696,28 +716,62 @@ FeltDB per test, through FeltKit's in-process test harness):
 | Customer delivery boundary | `feltkit/delivery.ts` | `tests/delivery-view.test.ts` |
 | Tenancy, imports, runs, review, delivery, clock, integrity | `feltkit/*.ts` | `tests/app.test.ts` |
 
+**Verified over HTTP** (`npm run test:http`, `tests/http-transaction.test.ts`, 4 tests), against get-it's running
+FeltKit server with real accounts:
+- **Identities:**
+  - owner and member;
+  - Operator A (fulfils);
+  - an Acme reviewer operator (approves A's work);
+  - Operator B (Globex only);
+  - a verified non-member;
+  - an anonymous caller.
+- **The full path:** outcome request → answers → bill set → completion → quote (created by the operator, found by the
+  customer through `intake.get`) → owner's acceptance → operator-recorded payment → acceptance for fulfillment →
+  review → approval by a second operator → publication → view and download of every packet file → a correction bound
+  to the delivered digest → re-import, re-review, re-approval, re-publication → the owner's acceptance of the
+  corrected digest.
+- **Refused:**
+  - Operator B, the non-member and anonymous callers on every Acme resource;
+  - members accepting quotes or deliveries;
+  - customers fulfilling, paying or publishing;
+  - operators accepting for the customer;
+  - self-approval;
+  - substituted quote and delivery digests;
+  - payment amounts other than the quote;
+  - downloads outside the packet (including path-like names).
+- **No duplicate economic effects:** exactly one quote acceptance, order, payment, fulfillment acceptance, delivery
+  acceptance and correction, despite repeated calls.
+- **The clock:** the order's clock and its first snapshot both carry the fulfillment-acceptance instant. Payment
+  leaves the clock paused.
+- **Customer responses:** no operator ids and no approval, publication, recording or import metadata, across every
+  customer-readable query and download.
+
+**Sabotage** (`npm run sabotage`): 15 guards, each broken in turn. Every one fails the test that reaches it.
+
 **Not verified:**
-- **No HTTP or UI surface has been exercised.** Every test calls FeltKit functions in-process. FeltKit serves these
-  functions over HTTP, but no request has been made against a running get-it server, and no customer UI exists.
+- **No customer UI exists.** The HTTP tests use bearer-token sessions. Cookie sessions and CSRF (what a browser
+  client uses) are FeltKit's and are not exercised here.
+- **Account e-mail** runs on FeltKit's in-memory development mail. Production needs `MAILPORT_URL`, and no real mail
+  has been sent.
 - **No payment provider.** Payments are operator-recorded. Nothing checks that money actually arrived.
 - **No real data.** No real customer or Ledger export has been reviewed. The fixtures are hand-written in Ledger's
   shape.
-- **Scale.** Behaviour near the 1000-bill limit, the size of a stored run, and the per-record source-record lookups at
-  that size are not load-tested.
-- **Time-based behaviour** (quote expiry, review-request expiry, lateness, the correction window) is tested by moving
-  stored times in tests, not by waiting. Quote expiry is tested on a consistently re-digested quote; an in-place edit
-  is refused as tampered.
-- **Refund and credit** of the difference between a paid quote and a partial acceptance is not modelled.
+- **Scale.** Behaviour near the 1000-bill limit and the size of a stored run are not load-tested.
+- **Time-based behaviour** (quote expiry, review-request expiry, lateness, the correction window) is tested in-process
+  by moving stored times.
+- **Partial-acceptance settlement** is undefined (§21).
 
-**Next step: a verified HTTP and customer UI surface.**
-1. Start the FeltKit server for get-it (`feltkit dev` / `feltkit start`) in a test.
-2. Drive the full path over HTTP with real sessions for an owner, a member, two operators and a non-member:
-   intake → quote → accept → payment → fulfillment → review → approval → publish → view, download → accept or correct.
-3. Assert the same refusals the in-process tests assert:
-   - tenant isolation;
-   - permissions;
-   - person-only steps;
-   - digest binding;
-   - downloads limited to the packet's files.
-4. Then build the customer UI as a FeltKit client over `intake.*`, `quotes.get`/`accept` and
-   `delivery.view`/`download`/`accept`/`requestCorrection`. No new server function is needed for it.
+**Next step: the customer UI.** A FeltKit client over the functions the HTTP tests prove, with no new server
+function. It should follow the business:
+1. Describe what you want done: `intake.create`.
+2. Answer the questions and provide the bill set, seeing exactly what is still missing: `intake.answer`,
+   `intake.uploadBillSet`, `intake.get` (live completeness report).
+3. See exactly what you will receive and on what assumptions; review price, scope, assumptions and timing:
+   `intake.get` → `quotes.get`.
+4. Purchase: `quotes.accept`. Payment stays operator-recorded until a provider is integrated.
+5. Track fulfillment: `orders.get`, `orders.clock`, `delivery.view`.
+6. Inspect and download results: `delivery.view`, `delivery.download`.
+7. Accept, or request a correction: `delivery.accept`, `delivery.requestCorrection`.
+
+The UI should be verified in a browser against the running server (cookie sessions, CSRF), with the HTTP refusals
+re-asserted through it.
