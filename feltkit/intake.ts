@@ -12,7 +12,7 @@ import { BillSetError } from "../src/bills.js";
 import { digest } from "../src/canonical.js";
 import { completeness, inputSpecs, validateAnswer, type AnswerState } from "../src/intake.js";
 import { addressBillSet, type AddressedBillSet } from "../src/snapshot.js";
-import { app, audit, inputBindings, intakeAnswers, intakeCompleteness, intakeSessions, outcomeRequests, quoteAcceptances, quotes } from "./app.js";
+import { app, audit, inputBindings, intakeAnswers, intakeCompleteness, intakeSessions, orders, outcomeRequests, quoteAcceptances, quotes } from "./app.js";
 import { CONTRACT, loadRecords, requireTenant, storeRecords } from "./_guards.js";
 
 export const create = app.mutation({
@@ -167,5 +167,37 @@ export const get = app.query({
       completeness: done ? { status: "complete" as const, completenessId: done.id, report: done.report, reportDigest: done.reportDigest } : { status: "open" as const, missing: live.missing, report: live.report },
       quote: quote ? { id: quote.id, digest: quote.digest, billCount: quote.billCount, priceMinor: quote.priceMinor, currency: quote.currency, validUntil: quote.validUntil, orderId: acceptance?.orderId ?? null } : null,
     };
+  },
+});
+
+/**
+ * The organization's requests, newest first: what was asked, whether intake is complete, the quote
+ * and the order once they exist. Without it a customer who leaves an unfinished intake cannot find
+ * it again. Customer-safe: no actors, only the customer's own words and states.
+ */
+export const list = app.query({
+  access: "intake.read",
+  args: {},
+  handler: async (ctx) => {
+    requireTenant(ctx);
+    const sessions = (await ctx.db.find(intakeSessions, {})).sort((a, b) => b.createdAt - a.createdAt || (a.id < b.id ? 1 : -1));
+    const out = [];
+    for (const session of sessions) {
+      const request = await ctx.db.get(outcomeRequests, session.outcomeRequestId);
+      const [done] = await ctx.db.find(intakeCompleteness, { sessionId: session.id });
+      const [quote] = done ? await ctx.db.find(quotes, { completenessId: done.id }) : [];
+      const [acceptance] = quote ? await ctx.db.find(quoteAcceptances, { quoteId: quote.id }) : [];
+      const order = acceptance ? await ctx.db.get(orders, acceptance.orderId) : null;
+      out.push({
+        sessionId: session.id,
+        request: request?.text ?? "",
+        createdAt: session.createdAt,
+        complete: Boolean(done),
+        quote: quote ? { id: quote.id, priceMinor: quote.priceMinor, currency: quote.currency } : null,
+        orderId: order?.id ?? null,
+        orderStatus: order?.status ?? null,
+      });
+    }
+    return out;
   },
 });

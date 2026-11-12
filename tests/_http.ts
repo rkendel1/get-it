@@ -64,11 +64,21 @@ export class Person {
 export async function withServer(fn: (http: Http) => Promise<void>) {
   const t = await createTestApp();
   const server = await startServer({ runtime: t.runtime, projectDir: process.cwd(), host: "127.0.0.1", port: 0, dashboard: { enabled: false, adminToken: "", dir: null } });
-  const http: Http = {
-    url: server.url,
+  try {
+    await fn(httpFor(server.url, t));
+  } finally {
+    await server.close();
+    await t.close();
+  }
+}
+
+/** An HTTP client for a running server (bearer sessions). */
+export function httpFor(url: string, t: TestApp): Http {
+  return {
+    url,
     t,
     async request(method, path, body, token) {
-      const r = await fetch(`${server.url}${path}`, {
+      const r = await fetch(`${url}${path}`, {
         method,
         headers: { ...(body !== undefined ? { "Content-Type": "application/json" } : {}), ...(token ? { Authorization: `Bearer ${token}` } : {}) },
         ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
@@ -77,12 +87,6 @@ export async function withServer(fn: (http: Http) => Promise<void>) {
       return { status: r.status, body: text ? JSON.parse(text) : null };
     },
   };
-  try {
-    await fn(http);
-  } finally {
-    await server.close();
-    await t.close();
-  }
 }
 
 const PASSWORD = "correct horse battery staple";
@@ -129,3 +133,14 @@ export async function refused(p: Promise<unknown>, code: string, hint?: string) 
 
 /** Storage, read beneath the tenant scope, only to count economic effects. */
 export const stored = (http: Http, name: string) => http.t.runtime.instance.handle("test.inspect").collection<Record<string, any>>(name).find({});
+
+/** Sign an existing account in over HTTP (a separate bearer session) and work in an organization. */
+export async function signIn(http: Http, email: string, tenantId?: string): Promise<Person> {
+  const r = await http.request("POST", "/api/auth/signin", { email, password: PASSWORD });
+  assert.equal(r.status, 200, `sign-in ${email}: ${JSON.stringify(r.body)}`);
+  const person = new Person(http, email, r.body.principal.id, r.body.token);
+  if (tenantId) await person.switchTo(tenantId);
+  return person;
+}
+
+export { PASSWORD };

@@ -125,7 +125,7 @@ test("every accounting mutation is refused, for every role, and the app has no o
       "accounting:request",
       "delivery:accept", "delivery:download", "delivery:files", "delivery:get", "delivery:publish", "delivery:requestCorrection", "delivery:view",
       "imports:list", "imports:record",
-      "intake:answer", "intake:complete", "intake:create", "intake:get", "intake:uploadBillSet",
+      "intake:answer", "intake:complete", "intake:create", "intake:get", "intake:list", "intake:uploadBillSet",
       "integrity:check",
       "orders:acceptForFulfillment", "orders:block", "orders:clock", "orders:get", "orders:list", "orders:unblock",
       "payments:record",

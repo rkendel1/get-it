@@ -2,3 +2,4 @@ node_modules/
 .feltkit/
 .feltdb/
 dist/
+test-results/
