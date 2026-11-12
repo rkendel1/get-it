@@ -2,10 +2,22 @@
 
 ## Implementation-Oriented Building Specification
 
-**Status:** Revision 2, before contract freeze
+**Status:** Revision 3. `svc_invoice_reconciliation@1.0.0` is **frozen**.
 **Date:** 2026-11-12
 **Audience:** Product, platform, fulfillment, security and operations
-**Supersedes:** Revision 1 (2026-11-12, "Proposed product and platform design")
+**Supersedes:** Revision 2 (same date, before contract freeze) and revision 1
+
+### Changes from revision 2 (decisions frozen 2026-11-12)
+
+| # | Decision | Where |
+|---|---|---|
+| 1 | Tenancy is FeltKit's **in-store tenant model**, with an explicit, required `tenantId` on every get-it record. Per-customer deployments are reserved for enterprise or regulatory requirements. | §15 |
+| 2 | `svc_invoice_reconciliation@1.0.0` frozen with the agreed tolerances, pricing, review, correction and charging rules. The contract file plus its pinned digest is the source of truth. | §5.1 |
+| 3 | QuickBooks Online is **operationally read-only**. The connector exposes no mutation method and refuses mutation intents. QBO credentials can technically carry write scope (there is no read-only accounting scope). | §7 |
+| 4 | Partial work is charged by the number of invoices the customer accepts. | §5.1, §14 |
+| 5 | Business days are Monday–Friday excluding US federal holidays (observed), in the customer's time zone. | §5.1 |
+| 6 | `rkendel1/ledger` is a **reference only**: not imported, not a dependency, and reconciliation is not written there. | Appendix B |
+| 7 | Phase 0 is implemented and tested (45 tests). | §27 |
 
 ### Changes from revision 1
 
@@ -94,7 +106,7 @@ consumes each component through its existing contract. Nothing here requires cha
 | Component | What it actually is | How get-it uses it |
 |---|---|---|
 | **FeltDB** (`@feltdb/core` 0.21.0) | Application database. Atomic multi-collection transactions with `requireAbsent`, `expectedVersion`, preconditions and idempotent `transactionId`. Enforced `unique` and `reference` fields. Content-addressed `storeContent` / `acquireContent` (sha256). `snapshot()` read models. One state contract per store name. | The single authority for all get-it state, through FeltKit. Source documents and deliverables are stored as content-addressed blobs. Append-only is enforced by get-it (§2.3). |
-| **FeltKit** (`@feltdb/feltkit` 0.3.x) | Application platform on FeltDB. Server, client and React. Sessions and tenants. `FeltDbIdempotencyStore`. Transactional outbox (`ctx.afterCommit`). Person-only approvals bound to the sha256 digest of the exact operation and input, with expiry and authority re-checked at execution. Agent action lifecycle with compare-and-swap transitions and reconcile on restart. Recurring schedules. | **The application platform get-it is built on.** It supplies idempotent commands, human checkpoints, step durability (§11), outbox delivery of notifications, and schedules for recurring orders (Phase 3). |
+| **FeltKit** (`@feltdb/feltkit` 0.3.27) | Application platform on FeltDB. Server, client and React. Sessions and tenants: one FeltDB instance per environment, with in-store tenant isolation through `{ tenant: true }` collections. `FeltDbIdempotencyStore`. Transactional outbox (`ctx.afterCommit`). Person-only approvals bound to the sha256 digest of the exact operation and input, with expiry and authority re-checked at execution. Agent action lifecycle with compare-and-swap transitions and reconcile on restart. Recurring schedules. | **The application platform get-it is built on.** It supplies idempotent commands, human checkpoints, step durability (§11), outbox delivery of notifications, and schedules for recurring orders (Phase 3). |
 | **AppPort** (core 1.7.x) | Capability contract protocol. Manifests with input/output schemas, scopes, `effect: observation \| consequential`, and idempotency keys bound to a request digest. Consequential capabilities are refused without a real authorizer. Transports: HTTP, MCP and others. | Every fulfillment unit (connector reads, matching, export) is an AppPort capability, so implementations are replaceable at the contract boundary. The connector's capabilities must all be `observation`. |
 | **AuthBoundry** | Policy and authority service. Tenants. `Delegation{capabilities, resource_scope, expires_at, revoked_at, chain}`. Separate human, agent and service principals. Explainable decisions. Append-only audit that fails closed. AppPort adapter `createAuthBoundryAuthorizer`. | Backs every customer grant (§7) and every capability authorization decision. Its decision id is recorded in evidence. |
 | **AppBoundry** | Artifact host and runtime, with a capability catalog, resolution, entitlements, composition, materialization, an execution ledger and provider lifecycle. It is a layer **under** products, not a product lifecycle. | Not used in Phase 1. It is the candidate capability catalog and plan resolver for Phase 2 composition (§16), subject to verification. Most runtime packages are private 0.1.0. |
@@ -158,7 +170,44 @@ Required sections, unchanged from revision 1:
 - boundaries; and
 - commercial terms.
 
-### 5.1 First contract: supplier invoice reconciliation (draft for freeze)
+### 5.1 First contract: supplier invoice reconciliation (frozen)
+
+**Frozen as `svc_invoice_reconciliation@1.0.0`.** Its source of truth is
+[`contracts/svc_invoice_reconciliation@1.0.0.json`](../contracts/svc_invoice_reconciliation@1.0.0.json). Its digest is
+pinned in [`contracts/frozen.json`](../contracts/frozen.json). Code loads the contract only through
+`loadFrozenContract()`, which refuses content that no longer matches the pin, and `tests/contract.test.ts` fails on any
+in-place edit. A change is a new version.
+
+Frozen terms:
+
+| Term | Value |
+|---|---|
+| Source | QuickBooks Online: `Bill` (supplier bills) and `PurchaseOrder`, read-only |
+| Match | Two-way, bill line ↔ PO line by `LinkedTxn.TxnLineId`, otherwise by a unique item on the linked PO |
+| Unit price | The greater of $1 or 1% of the PO unit price, per line, inclusive |
+| Quantity | Exact. No tolerance. |
+| Invoice total | The greater of $5 or 0.5% of the expected total, compared pre-tax, inclusive |
+| Review | The operator reviews exceptions. Exceptions **over $500**, and any exception in a foreign currency, need a person's approval of the exact packet by an operator other than the requester. |
+| Customer decisions | Ambiguous business questions (`duplicate_invoice`, `supplier_mismatch`, `po_line_ambiguous`) are the customer's to decide. Decisions are recorded only. No accounting change occurs. |
+| Price | $250 per run including 100 invoices, then $2 per additional invoice. Invoices counted are the in-scope bills in the snapshot. |
+| Turnaround | 2 business days after the order is accepted for fulfillment and every required input and access is complete |
+| Customer-blocked | A business day blocked at any time does not count. After 10 blocked business days: cancel or re-quote. |
+| Correction window | 5 business days from the delivery's local date |
+| Charging | Platform failure: not charged. Partial work: charged only if the customer accepts the completed portion, by the same pricing on the number of invoices accepted. Cancelled: not charged unless a completed portion is accepted. |
+| Business days | Monday–Friday excluding US federal holidays (observed: Saturday → Friday before, Sunday → Monday after), in the customer's time zone. A deadline is 23:59:59.999 local on the last counted day. |
+
+Interpretations written into the contract, because the decisions did not settle them:
+- **Partial billing of a purchase order** under "exact quantity": a bill for part of a PO line is a `quantity_variance`.
+  The exception carries the cumulative billed quantity, so the reviewer can see a partial delivery. Two bills that
+  together bill exactly the PO quantity are not over-billing.
+- **Over-billing** is computed across the bills in one snapshot only. Bills against the same PO outside the period are
+  not seen.
+- **A tenth exception type, `po_line_ambiguous`,** exists for a linked PO line that cannot be resolved. It is a
+  customer decision.
+- **Home currency** is an intake input (default USD), because the connector reads only bills and purchase orders, not
+  company settings.
+
+The draft below is kept for its definitions. Where it differs, the frozen file wins.
 
 **Outcome.** For a stated period and scope, reconcile every supplier invoice in the customer's accounting/ERP system
 against its purchase order. Produce:
@@ -218,14 +267,7 @@ Exception types (closed set in v1): `no_po_reference`, `po_not_found`, `supplier
 message to suppliers; contacting suppliers; three-way matching; currency conversion. Mixed currencies are reported as
 `currency_mismatch`, never converted.
 
-**Parameters that must be fixed to freeze the contract** (owner decisions, §26):
-- default tolerances;
-- review threshold;
-- price model and unit (per invoice, per period, or fixed + per invoice);
-- included volume;
-- committed turnaround;
-- correction window; and
-- which ERP the first connector targets.
+All parameters were fixed on 2026-11-12 (table above).
 
 ## 6. Intake (new product code)
 
@@ -275,6 +317,15 @@ AuthBoundry delegation.
 
 AuthBoundry has no purpose field today. Until it does, check 2 is get-it's responsibility and is tested. The
 missing purpose field is recorded as an AuthBoundry gap, not worked around inside AuthBoundry.
+
+**QuickBooks Online is operationally read-only.** QBO offers no read-only accounting scope. A
+`com.intuit.quickbooks.accounting` credential can technically write, so the guarantee is in get-it's code
+(`src/qbo.ts`), and the customer is told so in the contract (`source.accessNote`):
+1. The connector exposes only the four read operations. It has no mutation method.
+2. `invoke()` refuses any other operation before a request exists. A mutation intent is refused as `MUTATION_REFUSED`
+   and recorded. Any recorded refusal fails the `read_only` acceptance criterion.
+3. A transport guard refuses anything but HTTP GET reads of the `query` endpoint (a SELECT on Bill or PurchaseOrder) or
+   of a single Bill or PurchaseOrder.
 
 A revoked or expired grant makes the next invocation fail closed, and the execution pauses at a named prerequisite
 (§4.3). Credentials stay with the connector's credential store or a Resolver secret reference. They are never in
@@ -422,23 +473,19 @@ decision (§26).
 
 ## 15. Tenancy and security
 
-**Isolation (owner decision): one FeltDB namespace per tenant.**
+**Isolation (owner decision, revision 3): FeltKit's in-store tenant model.**
 
-Consequence, verified: FeltKit opens one FeltDB instance per environment. So a namespace per tenant means **one get-it
-deployment (FeltKit environment and state directory) per tenant**. Cross-tenant reads are then impossible by
-construction, not by query filtering.
+- Each customer organization is a FeltKit tenant. get-it staff work in it as members with the `operator` role.
+- Every get-it collection is `{ tenant: true }`. FeltKit limits every read and write to the session's live tenant:
+  another tenant's records read as absent, and a write naming another tenant is refused.
+- Every collection also **declares `tenantId` as a required field**, and get-it sets it explicitly from the session's
+  tenant. The typechecker refuses an insert without it (part of `npm test`). Every unique constraint includes it.
+- The integrity check verifies `tenantId` on every record.
+- Tested in `tests/app.test.ts`: the same operators work in two organizations, and nothing of one is readable,
+  writable, approvable or decidable from the other.
 
-This has costs:
-- per-tenant provisioning;
-- per-tenant upgrades and contract evolution; and
-- operator views that span tenants.
-
-Operator views are a separate read-only tool that reads each tenant's deployment with operator credentials. It is
-never a shared database.
-
-FeltKit's in-store tenant isolation (`{ tenant: true }` collections, enforced on every read and write and covered by
-its test suite) is the alternative if per-tenant deployment becomes the bottleneck. Switching is a recorded decision,
-not a drift.
+**Per-customer deployments** (a FeltDB namespace per customer, which under FeltKit means one deployment each) are
+reserved for enterprise or regulatory requirements. They are not the default.
 
 Also required:
 - AuthBoundry tenant on every grant (`TenantCurrent`);
@@ -594,7 +641,7 @@ The tenant is implicit in the deployment, and recorded in the envelope for expor
 In:
 - one service contract (supplier invoice reconciliation, two-way match);
 - one ERP connector with read-only invoice and PO capabilities;
-- tenancy as namespace per tenant;
+- tenancy as FeltKit in-store tenants with explicit `tenantId`;
 - deterministic intake and pricing;
 - operator-recorded payment;
 - step-record execution;
@@ -659,7 +706,7 @@ this product. It consumes their contracts, or it builds what it needs itself.
 | Approval bypassed | Only FeltKit approvals count. They are digest-bound, so a re-run invalidates them. |
 | Evidence incomplete | Acceptance criteria run before publication. A failure blocks delivery. |
 | Evidence tampering | Not mitigated in v1 (no tamper evidence in the stack). Disclosed. Phase 4. |
-| Per-tenant deployment overhead | Scripted provisioning. Tenancy model revisited with evidence (§15). |
+| Tenant data leakage in a shared store | FeltKit tenant scoping on every collection, explicit `tenantId`, isolation tests, integrity check. Per-customer deployment for enterprise or regulatory cases. |
 | FeltDB managed/remote mode unverified | v1 runs embedded local per tenant deployment, as Boundry Intel does. Remote is a separate verification. |
 | AuthBoundry ↔ AppPort version drift (1.0.2 vs 1.7.x) | Verify the `createAuthBoundryAuthorizer` adapter against get-it's AppPort version in Phase 1 before relying on it. |
 | Connector rate limits or partial reads | The snapshot records the source counts. `completeness` fails if the snapshot is partial. |
@@ -680,8 +727,8 @@ this product. It consumes their contracts, or it builds what it needs itself.
 10. A revoked or expired grant prevents the next invocation and pauses the execution with a named prerequisite.
 11. Usage and billing facts reconcile to execution facts (invoices processed).
 12. Rebuilding projections from facts reproduces the customer-visible order state.
-13. Tenant isolation: two tenant deployments share no FeltDB namespace, and no credential issued for one is accepted
-    by the other.
+13. Tenant isolation: a caller working in one organization can read, write, approve or decide nothing of another,
+    including through ids it learned. Every stored record carries the explicit `tenantId` of its organization.
 14. Replacing the connector, grant or payment adapter with its in-memory adapter does not change the command API.
 15. No fact collection is ever updated or deleted (§2.3). No capability with a non-`observation` effect is
     registered in v1.
@@ -695,14 +742,8 @@ this product. It consumes their contracts, or it builds what it needs itself.
 - Intent/Resolver (not reused; renamed roles);
 - the first outcome and connector scope;
 - the repository (get-it); and
-- the tenancy model (namespace per tenant).
-
-**Needed to freeze the §5.1 contract:**
-1. The target ERP for the first connector.
-2. Default tolerances (price, quantity, total) and the review threshold.
-3. Price model, unit, included volume and committed turnaround.
-4. The correction window, and the commercial treatment of failed, partial and customer-blocked work.
-5. Who reviews: a customer-side person, an operator, or either.
+- the tenancy model (FeltKit in-store tenants, revision 3); and
+- every parameter of the first contract (frozen 2026-11-12).
 
 **Needed before Phase 1 ships:**
 6. Payment adapter (default proposal: operator-recorded payment).
@@ -712,10 +753,9 @@ this product. It consumes their contracts, or it builds what it needs itself.
 ## 27. Implementation sequence
 
 1. ~~Inventory the Boundry stack~~ (done: Appendix A).
-2. Settle §26 items 1–5 and freeze `ServiceContract` `svc_invoice_reconciliation@1.0.0` with its acceptance criteria
-   as executable tests over fixtures.
-3. Build the FeltKit app skeleton: the fact envelope, the append-only rule, idempotent commands, and in-memory
-   adapters.
+2. ~~Freeze `svc_invoice_reconciliation@1.0.0` with its acceptance criteria as executable tests over fixtures~~ (done).
+3. ~~Build the FeltKit app skeleton~~ (done, Phase 0: orders, idempotent imports, deterministic runs, review, decisions
+   and the integrity check). Still to do: the fact envelope with correlation and causation ids.
 4. Build intake → quote with the in-memory connector.
 5. Build the reconciliation steps and acceptance criteria over recorded fixtures.
 6. Add AuthBoundry grants with the purpose check, then the real read-only connector.
@@ -747,3 +787,48 @@ Repositories were read at these commits:
 FeltDB facts come from the published `@feltdb/core` 0.21.0. Its source repository was not read. FeltKit's tenancy and
 instance model, added in this revision, were read in `packages/sdk/src/runtime/instance.ts`, `tenant-scope.ts` and
 `test/tenancy.test.ts`. Other repositories' test suites were read, **not run**.
+
+## Appendix B: Ledger (reference only)
+
+`rkendel1/ledger` (commit 3a8bce6) was read, not executed. It is a FeltKit double-entry accounting app with bills,
+vendors, approvals and an audit trail.
+
+**Decision: reference only.** get-it does not import it, depend on it, or put reconciliation in it.
+- Its bills have no quantity or unit price, and it has no purchase orders (`feltkit/app.ts:310-331`), so it cannot
+  drive a two-way match.
+- It is a book of record. get-it reads QuickBooks, so reconciling there would create two systems of record.
+- It is `private`, depends on an unpublished vendored FeltKit build, and has no deployment.
+
+Patterns get-it took from it:
+- tenant-scoped collections that declare `tenantId`, so unique constraints are per tenant;
+- integer minor units for money;
+- a person-only gate on approvals, with approver ≠ proposer, re-checked when decided;
+- an audit trail; and
+- an integrity check that recomputes invariants.
+
+## Appendix C: Phase 0 implementation and its limits
+
+Implemented in this repository and tested by `npm test` (typecheck, then 45 tests on a real FeltKit 0.3.27 runtime
+with a fresh FeltDB per test):
+
+| Area | Code | Tests |
+|---|---|---|
+| Frozen contract | `contracts/`, `src/contract.ts` | `tests/contract.test.ts` |
+| Integer-cent money and tolerances | `src/money.ts`, `src/tolerance.ts` | `tests/money-tolerance.test.ts` |
+| Business days and deadlines | `src/calendar.ts` | `tests/calendar.test.ts` |
+| Pricing and charging, including partial work | `src/pricing.ts` | `tests/pricing.test.ts` |
+| Read-only QBO connector and mutation refusal | `src/qbo.ts` | `tests/qbo-connector.test.ts` |
+| Two-way reconciliation, including partial PO billing | `src/reconcile.ts`, `src/snapshot.ts` | `tests/reconcile.test.ts` |
+| The seven acceptance criteria | `src/acceptance.ts` | `tests/acceptance.test.ts` |
+| Tenant isolation, idempotent imports, approvals, decisions, integrity | `feltkit/*.ts` | `tests/app.test.ts` |
+
+Not verified, and to be closed in Phase 1:
+- **No real QuickBooks.** The fixtures are hand-written in QBO's documented JSON shape, not recorded from a QBO sandbox.
+  It is unconfirmed whether QBO always returns `LinkedTxn.TxnLineId` on bill lines. If it does not, more lines resolve
+  by item or become `po_line_ambiguous`.
+- **No OAuth transport.** The real transport (OAuth refresh, base URL, 429/5xx retry) is not written, and no AuthBoundry
+  delegation or purpose check is wired yet (§7).
+- **Scale.** A run's output is stored as one document. Behaviour at thousands of bills is untested.
+- **Packet expiry** is an internal 7-day control, not a contract term.
+- **Not built yet:** intake, quoting, payment record, delivery, the export file, customer acceptance and correction
+  flows, and the turnaround clock wired to order facts. The calendar functions exist and are tested.

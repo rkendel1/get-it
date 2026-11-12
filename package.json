@@ -1,0 +1,25 @@
+{
+  "name": "get-it",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Outcome-driven service business on FeltKit. First outcome: supplier invoice reconciliation (QuickBooks Online, read-only).",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "feltkit codegen && tsc --noEmit && feltkit test",
+    "typecheck": "feltkit codegen && tsc --noEmit",
+    "codegen": "feltkit codegen",
+    "contract:digest": "tsx scripts/contract-digest.ts",
+    "test:only": "feltkit test"
+  },
+  "dependencies": {
+    "@feltdb/feltkit": "0.3.27"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.1",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3"
+  }
+}

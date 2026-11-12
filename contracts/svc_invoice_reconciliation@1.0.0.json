@@ -1,0 +1,111 @@
+{
+  "schema": "get-it.service-contract/1",
+  "id": "svc_invoice_reconciliation",
+  "version": "1.0.0",
+  "status": "frozen",
+  "frozenOn": "2026-11-12",
+  "title": "Supplier invoice reconciliation",
+  "outcome": "For a stated period and scope, reconcile every supplier bill in the customer's QuickBooks Online company against its purchase order (two-way match), and deliver reconciled records, discrepancy exceptions, an evidence package and an export.",
+  "source": {
+    "system": "quickbooks-online",
+    "entities": ["Bill", "PurchaseOrder"],
+    "access": "operationally-read-only",
+    "accessNote": "QuickBooks Online offers no read-only accounting scope: the OAuth credential (com.intuit.quickbooks.accounting) can technically write. get-it's connector exposes no mutation method, issues only HTTP GET queries and reads, and refuses any mutation intent before any request is sent. No write, payment or email action is performed by this contract."
+  },
+  "inputs": [
+    { "id": "scope.period", "kind": "date-range", "field": "Bill.TxnDate", "required": true, "source": "intake" },
+    { "id": "scope.suppliers", "kind": "vendor-filter", "required": false, "default": "all", "source": "intake" },
+    { "id": "customer.timeZone", "kind": "iana-time-zone", "required": true, "source": "intake" },
+    { "id": "company.homeCurrency", "kind": "iso-4217", "required": true, "default": "USD", "source": "intake", "note": "a bill or purchase order without a CurrencyRef is in the home currency; review thresholds apply only in the home currency" },
+    { "id": "bills", "kind": "canonical-bill-records", "required": true, "source": "connector" },
+    { "id": "purchase_orders", "kind": "canonical-purchase-order-records", "required": true, "source": "connector" }
+  ],
+  "requirements": [
+    { "id": "qbo_connection", "kind": "grant", "required": true, "operations": ["bill.list", "bill.get", "purchaseOrder.list", "purchaseOrder.get"], "effect": "observation", "purpose": "this order only", "expiresNoLaterThan": "end of the order's correction window" }
+  ],
+  "matching": {
+    "type": "two-way",
+    "lineLink": "A bill line is matched to the purchase-order line named by its LinkedTxn (TxnType PurchaseOrder, TxnLineId). Without a TxnLineId, it is matched to the single line of the linked purchase order with the same item; zero or several candidates is po_line_ambiguous.",
+    "accountBasedLines": "An account-based line (no item, quantity or unit price) is compared as quantity 1 at a unit price equal to its amount.",
+    "totalBasis": "pre-tax line total: the sum of the bill's line amounts is compared with the sum of (bill quantity x purchase-order unit price) over its matched lines. Tax is reported, not compared.",
+    "cumulative": "Over-billing is computed across the bills in the same source snapshot only, in (TxnDate, Id) order.",
+    "duplicates": "Bills from the same vendor with the same DocNumber (trimmed, case-insensitive) are duplicates; without a DocNumber, the same vendor, TxnDate and total.",
+    "excluded": ["three-way match (receipt of goods)", "currency conversion", "tax validation"]
+  },
+  "tolerances": {
+    "unitPrice": { "rule": "greater_of", "absoluteMicros": 1000000, "basisPoints": 100, "scope": "per line", "reference": "purchase-order unit price", "text": "the greater of $1 or 1% of the PO unit price, per line" },
+    "quantity": { "rule": "exact", "text": "exact match; no quantity tolerance" },
+    "invoiceTotal": { "rule": "greater_of", "absoluteCents": 500, "basisPoints": 50, "reference": "expected pre-tax total", "text": "the greater of $5 or 0.5% of the expected total" },
+    "inclusive": true
+  },
+  "statuses": ["matched", "matched_within_tolerance", "discrepancy", "unmatched"],
+  "exceptionTypes": [
+    { "type": "no_po_reference", "status": "unmatched", "decision": "operator" },
+    { "type": "po_not_found", "status": "unmatched", "decision": "operator" },
+    { "type": "po_line_ambiguous", "status": "discrepancy", "decision": "customer" },
+    { "type": "supplier_mismatch", "status": "discrepancy", "decision": "customer" },
+    { "type": "currency_mismatch", "status": "discrepancy", "decision": "operator" },
+    { "type": "price_variance", "status": "discrepancy", "decision": "operator" },
+    { "type": "quantity_variance", "status": "discrepancy", "decision": "operator" },
+    { "type": "total_variance", "status": "discrepancy", "decision": "operator" },
+    { "type": "po_overbilled", "status": "discrepancy", "decision": "operator" },
+    { "type": "duplicate_invoice", "status": "discrepancy", "decision": "customer" }
+  ],
+  "amountAtStake": {
+    "price_variance": "|bill unit price - PO unit price| x bill quantity",
+    "quantity_variance": "|bill quantity - PO quantity| x PO unit price",
+    "total_variance": "|bill pre-tax total - expected pre-tax total|",
+    "po_overbilled": "quantity (or amount) billed beyond the PO line, at the PO unit price",
+    "otherwise": "the bill's pre-tax total"
+  },
+  "review": {
+    "operatorReviewsExceptions": true,
+    "humanReviewRequiredOverCents": 50000,
+    "reviewRequiredWhenForeignCurrency": true,
+    "approval": "one person approval of the exact delivery packet digest by an operator who did not request the review; agents and services cannot approve; a re-run produces a new packet and needs a new approval",
+    "customerDecisions": "the customer resolves or approves ambiguous business decisions (exception types marked decision: customer); a decision is recorded and never changes the source system"
+  },
+  "deliverables": [
+    { "id": "reconciled_records", "formats": ["json", "csv"] },
+    { "id": "exceptions", "formats": ["json", "csv"] },
+    { "id": "evidence_package", "formats": ["json"] },
+    { "id": "export", "formats": ["zip(csv,json)"] }
+  ],
+  "acceptanceCriteria": [
+    { "id": "completeness", "test": "every in-scope bill of the source snapshot has exactly one reconciled record, and no record names a bill outside it" },
+    { "id": "traceability", "test": "every record and exception cites source records whose digests are in the snapshot manifest" },
+    { "id": "arithmetic", "test": "recomputing the reconciliation from the snapshot and the contract gives the delivered records and exceptions exactly" },
+    { "id": "tolerance", "test": "a record's status agrees with its variances under the contract tolerances" },
+    { "id": "read_only", "test": "every connector invocation for the order is an observation, and no mutation was attempted" },
+    { "id": "reviewed", "test": "every exception that requires review is covered by a person approval of the delivered packet's digest" },
+    { "id": "on_time", "test": "deliverables were published no later than the turnaround deadline" }
+  ],
+  "boundaries": {
+    "excludedActions": ["write to QuickBooks Online", "approve, hold or pay bills", "send email or messages", "contact suppliers", "three-way match", "currency conversion", "change accounting records"]
+  },
+  "calendar": {
+    "businessDays": "Monday to Friday, excluding US federal holidays (observed dates: a Saturday holiday is observed the Friday before, a Sunday holiday the Monday after), in the customer's time zone",
+    "holidays": ["New Year's Day", "Birthday of Martin Luther King, Jr.", "Washington's Birthday", "Memorial Day", "Juneteenth National Independence Day", "Independence Day", "Labor Day", "Columbus Day", "Veterans Day", "Thanksgiving Day", "Christmas Day"]
+  },
+  "service": {
+    "turnaroundBusinessDays": 2,
+    "turnaroundStarts": "when the order is accepted for fulfillment and every required input and access is complete, whichever is later",
+    "deadline": "the end (23:59:59.999, customer time zone) of the Nth counted business day after the start date",
+    "customerBlocked": "a business day on which the order is blocked by the customer at any time does not count toward the turnaround",
+    "blockedLimitBusinessDays": 10,
+    "afterBlockedLimit": "cancel or re-quote (operator decision, recorded)",
+    "correctionWindowBusinessDays": 5,
+    "correctionWindowStarts": "the delivery's local date"
+  },
+  "commercial": {
+    "currency": "USD",
+    "pricing": { "basePerRunCents": 25000, "includedInvoices": 100, "perAdditionalInvoiceCents": 200 },
+    "invoicesCounted": "in-scope bills in the source snapshot",
+    "charging": {
+      "platformFailure": "not charged",
+      "delivered": "charged on the invoices counted",
+      "partial": "charged only when the customer accepts the completed portion, by the same pricing on the number of invoices accepted",
+      "cancelled": "not charged, unless the customer accepts a completed portion (charged as partial)"
+    }
+  }
+}
